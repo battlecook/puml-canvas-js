@@ -4,6 +4,29 @@
   "description": "Native JavaScript implementation of PlantUML diagram rendering for the browser",
   "type": "module",
   "license": "MIT",
+  "author": "battlecook",
+  "homepage": "https://github.com/battlecook/puml-canvas-js#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/battlecook/puml-canvas-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/battlecook/puml-canvas-js/issues"
+  },
+  "keywords": [
+    "plantuml",
+    "uml",
+    "diagram",
+    "svg",
+    "renderer",
+    "typescript",
+    "sequence-diagram",
+    "class-diagram",
+    "activity-diagram",
+    "state-diagram",
+    "gantt",
+    "mindmap"
+  ],
   "main": "./dist/puml-canvas-js.js",
   "module": "./dist/puml-canvas-js.js",
   "types": "./dist/index.d.ts",
