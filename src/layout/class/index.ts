@@ -54,6 +54,21 @@ const COLOR_BG_ABSTRACT = '#fefece';
 const COLOR_BG_ANNOTATION = '#e7d6f0';
 const COLOR_BG_RECORD = '#e6f3ff';
 
+// Compact-badge mode (when `hide empty members` is set and the class has none)
+const BADGE_R = 9;
+const BADGE_GAP = 6;
+const BADGE_PAD_X = 8;
+const BADGE_PAD_Y = 6;
+const BADGE_NAME_FONT = 13;
+const BADGE_STEREO_FONT = 10;
+const BADGE_RADIUS = 5;
+const BADGE_COLOR_CLASS = '#7cb098';
+const BADGE_COLOR_INTERFACE = '#a78bfa';
+const BADGE_COLOR_ABSTRACT = '#7dd3c0';
+const BADGE_COLOR_ANNOTATION = '#e07a5f';
+const BADGE_COLOR_ENUM = '#e58e7b';
+const BADGE_COLOR_RECORD = '#f59e0b';
+
 const EDGE_STYLE: EdgeStyle = {
   color: COLOR_EDGE,
   fontFamily: FONT_FAMILY,
@@ -80,7 +95,9 @@ export function layoutClass(ast: ClassAst): Scene {
     };
   }
 
-  const sizes = new Map(ast.classes.map((c) => [c.id, measureClass(c)]));
+  const sizes = new Map(
+    ast.classes.map((c) => [c.id, measureClass(c, isCompact(c, ast.hideEmptyMembers))]),
+  );
   const titleHeight = ast.title ? TITLE_FONT + TITLE_GAP : 0;
 
   const selfLoops = ast.relationships.filter((r) => r.source === r.target);
@@ -127,7 +144,8 @@ export function layoutClass(ast: ClassAst): Scene {
   for (const c of ast.classes) {
     const pos = base.positions.get(c.id);
     if (!pos) continue;
-    shapes.push(...drawClassBox(c, pos.x, pos.y, sizes.get(c.id)!));
+    const compact = isCompact(c, ast.hideEmptyMembers);
+    shapes.push(...drawClassBox(c, pos.x, pos.y, sizes.get(c.id)!, compact));
   }
 
   void positions;
@@ -334,7 +352,15 @@ function layoutLayered(
   };
 }
 
-function measureClass(c: ClassDecl): BoxSize {
+function isCompact(c: ClassDecl, hideEmptyMembers: boolean): boolean {
+  if (!hideEmptyMembers) return false;
+  if (c.members.length > 0) return false;
+  if (c.enumConstants.length > 0) return false;
+  return true;
+}
+
+function measureClass(c: ClassDecl, compact: boolean): BoxSize {
+  if (compact) return measureCompact(c);
   const stereoLine = computeStereotypeLine(c);
   const stereoH = stereoLine ? Math.ceil(FONT_STEREO * 1.2) : 0;
   const nameW = measureText(c.name, FONT_NAME).width;
@@ -360,6 +386,20 @@ function measureClass(c: ClassDecl): BoxSize {
     if (count > 0) bodyH += SEP_PAD + ROW_HEIGHT * count + SEP_PAD;
   }
   return { w, h: titleH + bodyH };
+}
+
+function measureCompact(c: ClassDecl): BoxSize {
+  const stereoText = c.stereotype ? `«${c.stereotype}»` : '';
+  const nameW = measureText(c.name, BADGE_NAME_FONT).width;
+  const stereoW = stereoText ? measureText(stereoText, BADGE_STEREO_FONT).width : 0;
+  const labelW = Math.max(nameW, stereoW);
+  const w = BADGE_PAD_X + BADGE_R * 2 + BADGE_GAP + labelW + BADGE_PAD_X;
+  const nameH = Math.ceil(BADGE_NAME_FONT * 1.3);
+  const stereoH = stereoText ? Math.ceil(BADGE_STEREO_FONT * 1.2) : 0;
+  const innerH = stereoH + nameH;
+  const minInner = BADGE_R * 2;
+  const h = BADGE_PAD_Y + Math.max(innerH, minInner) + BADGE_PAD_Y;
+  return { w, h };
 }
 
 function bodySections(c: ClassDecl): number[] {
@@ -407,7 +447,8 @@ function formatMember(m: ClassMember): string {
   return prefix + body;
 }
 
-function drawClassBox(c: ClassDecl, x: number, y: number, sz: BoxSize): Shape[] {
+function drawClassBox(c: ClassDecl, x: number, y: number, sz: BoxSize, compact: boolean): Shape[] {
+  if (compact) return drawCompactBadge(c, x, y, sz);
   const stereoLine = computeStereotypeLine(c);
   const stereoH = stereoLine ? Math.ceil(FONT_STEREO * 1.2) : 0;
   const titleH = BOX_PAD_Y + stereoH + Math.ceil(FONT_NAME * 1.2) + BOX_PAD_Y;
@@ -464,6 +505,96 @@ function drawClassBox(c: ClassDecl, x: number, y: number, sz: BoxSize): Shape[] 
   if (methods.length > 0) {
     shapes.push(...drawSection(x, yCursor, sz.w, methods.map(formatMember)));
   }
+
+  return shapes;
+}
+
+function badgeLetterFor(c: ClassDecl): string {
+  if (c.stereotype) {
+    const ch = c.stereotype.trim()[0];
+    if (ch) return ch.toUpperCase();
+  }
+  switch (c.classKind) {
+    case 'class':      return 'C';
+    case 'interface':  return 'I';
+    case 'enum':       return 'E';
+    case 'abstract':   return 'A';
+    case 'annotation': return '@';
+    case 'record':     return 'R';
+  }
+}
+
+function badgeColorFor(kind: ClassKind): string {
+  switch (kind) {
+    case 'class':      return BADGE_COLOR_CLASS;
+    case 'interface':  return BADGE_COLOR_INTERFACE;
+    case 'enum':       return BADGE_COLOR_ENUM;
+    case 'abstract':   return BADGE_COLOR_ABSTRACT;
+    case 'annotation': return BADGE_COLOR_ANNOTATION;
+    case 'record':     return BADGE_COLOR_RECORD;
+  }
+}
+
+function drawCompactBadge(c: ClassDecl, x: number, y: number, sz: BoxSize): Shape[] {
+  const shapes: Shape[] = [];
+  shapes.push({
+    type: 'rect',
+    x, y, w: sz.w, h: sz.h,
+    rx: BADGE_RADIUS, ry: BADGE_RADIUS,
+    style: { fill: '#fbfbfa', stroke: COLOR_LINE, strokeWidth: 1 },
+  });
+
+  const cx = x + BADGE_PAD_X + BADGE_R;
+  const cy = y + sz.h / 2;
+  shapes.push({
+    type: 'circle',
+    cx, cy, r: BADGE_R,
+    style: { fill: badgeColorFor(c.classKind), stroke: COLOR_LINE, strokeWidth: 1 },
+  });
+  shapes.push({
+    type: 'text',
+    x: cx, y: cy,
+    text: badgeLetterFor(c),
+    anchor: 'middle',
+    baseline: 'middle',
+    font: { family: FONT_FAMILY, size: BADGE_NAME_FONT - 1, weight: 'bold', color: '#fff' },
+  });
+
+  const stereoText = c.stereotype ? `«${c.stereotype}»` : '';
+  const labelX = cx + BADGE_R + BADGE_GAP;
+  const stereoH = stereoText ? Math.ceil(BADGE_STEREO_FONT * 1.2) : 0;
+  const nameH = Math.ceil(BADGE_NAME_FONT * 1.3);
+  const blockH = stereoH + nameH;
+  let textY = cy - blockH / 2;
+
+  if (stereoText) {
+    textY += Math.ceil(BADGE_STEREO_FONT * 0.9);
+    shapes.push({
+      type: 'text',
+      x: labelX, y: textY,
+      text: stereoText,
+      anchor: 'start',
+      baseline: 'alphabetic',
+      font: { family: FONT_FAMILY, size: BADGE_STEREO_FONT, style: 'italic', color: '#555' },
+    });
+    textY += Math.ceil(BADGE_STEREO_FONT * 0.3);
+  }
+
+  const italic = c.classKind === 'abstract' || c.classKind === 'interface';
+  shapes.push({
+    type: 'text',
+    x: labelX, y: textY + Math.ceil(BADGE_NAME_FONT * 0.9),
+    text: c.name,
+    anchor: 'start',
+    baseline: 'alphabetic',
+    font: {
+      family: FONT_FAMILY,
+      size: BADGE_NAME_FONT,
+      weight: italic ? 'normal' : 'bold',
+      style: italic ? 'italic' : 'normal',
+      color: '#000',
+    },
+  });
 
   return shapes;
 }

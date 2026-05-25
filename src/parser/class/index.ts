@@ -27,13 +27,20 @@ import { parseRelationship } from './relationships.js';
 const WRAPPER = /^@(start|end)\w+/i;
 const LINE_COMMENT = /^\s*'/;
 const TITLE = /^title\s+(.+)\s*$/i;
+const HIDE_EMPTY_MEMBERS = /^hide\s+empty\s+members\s*$/i;
 
 interface BodyContext {
   decl: ClassDecl;
 }
 
 export function parseClass(source: string): ClassAst {
-  const ast: ClassAst = { kind: 'class', title: '', classes: [], relationships: [] };
+  const ast: ClassAst = {
+    kind: 'class',
+    title: '',
+    classes: [],
+    relationships: [],
+    hideEmptyMembers: false,
+  };
   const byId = new Map<string, ClassDecl>();
   const noteIds = new Set<string>();
   const lines = source.split(/\r\n|\r|\n/);
@@ -75,6 +82,11 @@ export function parseClass(source: string): ClassAst {
     const titleMatch = TITLE.exec(text);
     if (titleMatch) {
       ast.title = titleMatch[1]!.trim();
+      continue;
+    }
+
+    if (HIDE_EMPTY_MEMBERS.test(text)) {
+      ast.hideEmptyMembers = true;
       continue;
     }
 

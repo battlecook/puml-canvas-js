@@ -1,4 +1,4 @@
-import type { ClassRelationship, EndMarker, RelationKind } from '../../ast/class.js';
+import type { ClassRelationship, EndMarker, LabelDirection, RelationKind } from '../../ast/class.js';
 import { ARROW, ARROW_FULL, REL_LEFT, REL_RIGHT } from './patterns.js';
 
 export function parseRelationship(line: string): ClassRelationship | null {
@@ -8,12 +8,22 @@ export function parseRelationship(line: string): ClassRelationship | null {
   const leftRaw = line.slice(0, found.idx).trim();
   let rightRaw = line.slice(found.idx + found.arrow.length).trim();
   let label = '';
+  let labelDirection: LabelDirection = 'none';
 
   const colonIdx = findUnquotedColon(rightRaw);
   if (colonIdx !== -1) {
     label = rightRaw.slice(colonIdx + 1).trim();
     rightRaw = rightRaw.slice(0, colonIdx).trim();
-    label = label.replace(/^[<>]\s+/, '').replace(/\s+[<>]$/, '').trim();
+    // PlantUML reading-direction marker: `< label` (right-to-left in source order)
+    // or `label >` (left-to-right). Capture and strip; the layout draws a
+    // small triangle next to the label oriented to match.
+    if (/^<\s+/.test(label)) {
+      labelDirection = 'backward';
+      label = label.replace(/^<\s+/, '').trim();
+    } else if (/\s+>$/.test(label)) {
+      labelDirection = 'forward';
+      label = label.replace(/\s+>$/, '').trim();
+    }
   }
 
   const left = REL_LEFT.exec(leftRaw);
@@ -38,6 +48,7 @@ export function parseRelationship(line: string): ClassRelationship | null {
     sourceMarker: cls.leftMarker,
     targetMarker: cls.rightMarker,
     label,
+    labelDirection,
   };
 }
 

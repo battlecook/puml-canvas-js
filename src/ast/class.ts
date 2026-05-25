@@ -40,6 +40,8 @@ export type EndMarker =
   | 'diamond-filled'
   | 'diamond-open';
 
+export type LabelDirection = 'forward' | 'backward' | 'none';
+
 export interface ClassRelationship {
   source: string;
   target: string;
@@ -51,6 +53,7 @@ export interface ClassRelationship {
   sourceMarker: EndMarker;
   targetMarker: EndMarker;
   label: string;
+  labelDirection: LabelDirection;
 }
 
 export interface ClassAst {
@@ -58,4 +61,5 @@ export interface ClassAst {
   title: string;
   classes: ClassDecl[];
   relationships: ClassRelationship[];
+  hideEmptyMembers: boolean;
 }

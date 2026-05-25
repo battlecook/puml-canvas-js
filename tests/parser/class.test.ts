@@ -122,4 +122,41 @@ describe('class parser — members', () => {
     ].join('\n'));
     expect(a.classes[0]?.members).toHaveLength(1);
   });
+
+  it('sets hideEmptyMembers when `hide empty members` directive is present', () => {
+    const a = ast('@startuml\nhide empty members\nclass A\n@enduml');
+    expect(a.hideEmptyMembers).toBe(true);
+  });
+
+  it('leaves hideEmptyMembers false by default', () => {
+    const a = ast('@startuml\nclass A\n@enduml');
+    expect(a.hideEmptyMembers).toBe(false);
+  });
+
+  it('parses relationships using non-standard markers as plain-line associations', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'Class21 #-- Class22',
+        'Class23 x-- Class24',
+        'Class25 }-- Class26',
+        'Class27 +-- Class28',
+        'Class29 ^-- Class30',
+        '@enduml',
+      ].join('\n'),
+    );
+    // All 5 relationships must be created, and all 10 classes auto-registered.
+    expect(a.relationships).toHaveLength(5);
+    expect(a.classes.map((c) => c.id)).toEqual([
+      'Class21', 'Class22', 'Class23', 'Class24',
+      'Class25', 'Class26', 'Class27', 'Class28',
+      'Class29', 'Class30',
+    ]);
+    // Unrecognized markers degrade to `none` (rendered as a plain line).
+    for (const rel of a.relationships) {
+      expect(rel.sourceMarker).toBe('none');
+      expect(rel.targetMarker).toBe('none');
+      expect(rel.style).toBe('solid');
+    }
+  });
 });

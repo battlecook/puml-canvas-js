@@ -48,7 +48,11 @@ export type DiagramAst =
 
 export type {
   ParticipantShape,
+  ParticipantLineStyle,
+  ParticipantLine,
+  ParticipantSection,
   Participant,
+  ArrowMarker,
   ArrowStyle,
   MessageStmt,
   NotePosition,

@@ -18,8 +18,17 @@ export const MEMBER_METHOD = /^([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?::\s*(.+?))?\s*$
 export const MEMBER_FIELD = /^([A-Za-z_]\w*)\s*(?::\s*(.+?))?\s*$/;
 export const ENUM_CONSTANT = /^([A-Za-z_]\w*)\s*$/;
 
-export const ARROW = /(?:<\||<|o|\*)?(?:-{2,}|\.{2,})(?:\|>|>|o|\*)?/g;
-export const ARROW_FULL = /^(?:<\||<|o|\*)?(?:-{2,}|\.{2,})(?:\|>|>|o|\*)?$/;
+// Marker characters tolerated by the relationship arrow tokenizer.
+// `<|`/`|>` (triangle), `<`/`>` (arrow), `o` (open diamond), `*` (filled diamond)
+// are the semantically meaningful ones. The bracketed set (`+ # x } { ^`)
+// catches less-common or non-standard markers users sometimes type — we accept
+// them so the relationship parses (rendered as a plain line) instead of being
+// silently dropped.
+// One or more dashes is enough for a class association (PlantUML 본가 compat:
+// `A - B` is a valid plain association — the dash count is purely a layout
+// length hint, not a semantic difference).
+export const ARROW = /(?:<\||<|o|\*|[+#x}{^])?(?:-+|\.{2,})(?:\|>|>|o|\*|[+#x}{^])?/g;
+export const ARROW_FULL = /^(?:<\||<|o|\*|[+#x}{^])?(?:-+|\.{2,})(?:\|>|>|o|\*|[+#x}{^])?$/;
 export const REL_LEFT = /^("[^"]+"|\[[^\]]+\]|\([^)]+\)|:[^:"]+:|[^\s"]+)(?:\s+"([^"]+)")?\s*$/;
 export const REL_RIGHT = /^(?:"([^"]+)"\s+)?("[^"]+"|\[[^\]]+\]|\([^)]+\)|:[^:"]+:|[^\s"]+)\s*$/;
 

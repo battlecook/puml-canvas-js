@@ -95,6 +95,7 @@ export function layoutContainer(ast: ContainerAst): Scene {
     sourceMarker: r.sourceMarker,
     targetMarker: r.targetMarker,
     label: r.label,
+    labelDirection: 'none',
   });
 
   const selfLoops = ast.relationships.filter((r) => r.source === r.target);

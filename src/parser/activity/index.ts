@@ -14,6 +14,10 @@ const LINE_COMMENT = /^\s*'/;
 const TITLE = /^title\s+(.+)\s*$/i;
 
 const ACTION = /^:(.+);$/;
+// Extension: `- Some text` lines are treated as action steps, equivalent to
+// `:Some text;`. PlantUML本家 doesn't document this but several PlantUML-compatible
+// viewers accept it as a markdown-style shortcut and render a sequential flow.
+const DASH_ACTION = /^-\s+(.+?)\s*$/;
 const IF = /^if\s*\((.*?)\)\s*then(?:\s*\((.*?)\))?\s*$/i;
 const ELSEIF = /^elseif\s*\((.*?)\)\s*then(?:\s*\((.*?)\))?\s*$/i;
 const ELSE = /^else(?:\s*\((.*?)\))?\s*$/i;
@@ -119,6 +123,12 @@ function parseStatement(ctx: Ctx): ActivityNode | null {
   if (am) {
     ctx.i++;
     return { type: 'action', text: am[1]!.trim() };
+  }
+
+  const dm = DASH_ACTION.exec(line);
+  if (dm) {
+    ctx.i++;
+    return { type: 'action', text: dm[1]!.trim() };
   }
 
   if (END_NODE.test(line)) {

@@ -232,6 +232,7 @@ function sugiyamaArrange(
     sourceMarker: t.sourceMarker,
     targetMarker: t.targetMarker,
     label: t.label,
+    labelDirection: 'none',
   }));
 
   const edges = buildLayoutEdges(classRels);

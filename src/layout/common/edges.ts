@@ -91,6 +91,14 @@ export function drawLayeredEdge(
       baseline: 'middle',
       font: { family: style.fontFamily, size: style.labelFontSize, color: '#000' },
     });
+    const triangle = computeLabelDirectionTriangle(
+      labelPlacement,
+      rel,
+      original,
+      fromId,
+      style.labelFontSize,
+    );
+    if (triangle) shapes.push(triangle);
   }
 
   if (startMult) {
@@ -281,6 +289,72 @@ function midpoint(points: Array<[number, number]>): Position {
     target -= segLengths[i]!;
   }
   return { x: points[points.length - 1]![0], y: points[points.length - 1]![1] };
+}
+
+/**
+ * Builds a small filled triangle next to the label whose apex points along the
+ * edge in the reading direction the user specified.
+ *
+ * Reading direction comes from PlantUML's `< label` (backward) or `label >`
+ * (forward) markers. Forward means "read source → target in source-text order".
+ * Layout may flip which end is drawn on top, so we always compute the screen
+ * vector for rel.source → rel.target and invert when fromId is the target.
+ */
+function computeLabelDirectionTriangle(
+  labelPlacement: { x: number; y: number; anchor: 'start' | 'middle' | 'end' },
+  rel: EdgeAttrs,
+  original: Vec[],
+  fromId: string,
+  fontSize: number,
+): Shape | null {
+  const dir = rel.labelDirection;
+  if (dir !== 'forward' && dir !== 'backward') return null;
+  if (original.length < 2) return null;
+
+  const first = original[0]!;
+  const last = original[original.length - 1]!;
+  let dx = last.x - first.x;
+  let dy = last.y - first.y;
+  if (fromId !== rel.source) {
+    dx = -dx;
+    dy = -dy;
+  }
+  if (dir === 'backward') {
+    dx = -dx;
+    dy = -dy;
+  }
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return null;
+  const ux = dx / len;
+  const uy = dy / len;
+
+  const labelW = (rel.label?.length ?? 0) * fontSize * 0.55;
+  let labelLeftX: number;
+  switch (labelPlacement.anchor) {
+    case 'start':  labelLeftX = labelPlacement.x; break;
+    case 'end':    labelLeftX = labelPlacement.x - labelW; break;
+    case 'middle':
+    default:       labelLeftX = labelPlacement.x - labelW / 2; break;
+  }
+
+  const SIZE = 7;
+  const GAP = 3;
+  const cx = labelLeftX - GAP - SIZE / 2;
+  const cy = labelPlacement.y;
+  const apex: [number, number] = [cx + ux * (SIZE / 2), cy + uy * (SIZE / 2)];
+  const baseCx = cx - ux * (SIZE / 2);
+  const baseCy = cy - uy * (SIZE / 2);
+  const px = -uy;
+  const py = ux;
+  const half = SIZE * 0.45;
+  const b1: [number, number] = [baseCx + px * half, baseCy + py * half];
+  const b2: [number, number] = [baseCx - px * half, baseCy - py * half];
+
+  return {
+    type: 'polygon',
+    points: [apex, b1, b2],
+    style: { fill: '#000', stroke: '#000', strokeWidth: 1 },
+  };
 }
 
 function multLabel(text: string, near: Vec, far: Vec, t: number, style: EdgeStyle): Shape {

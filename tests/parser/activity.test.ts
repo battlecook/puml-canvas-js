@@ -20,6 +20,30 @@ describe('activity parser — linear', () => {
     const a = ast('@startuml\ntitle Flow\n:A;\n@enduml');
     expect(a.title).toBe('Flow');
   });
+
+  it('treats `- text` lines as action steps (compat-viewer extension)', () => {
+    const a = ast(
+      [
+        '@startuml',
+        '- Action 1',
+        '- Action 2',
+        '- Action 3',
+        '@enduml',
+      ].join('\n'),
+    );
+    expect(a.body).toEqual([
+      { type: 'action', text: 'Action 1' },
+      { type: 'action', text: 'Action 2' },
+      { type: 'action', text: 'Action 3' },
+    ]);
+  });
+
+  it('allows mixing `- text` with `:text;` action steps', () => {
+    const a = ast('@startuml\n- First\n:Second;\n- Third\n@enduml');
+    expect(a.body.map((n) => (n.type === 'action' ? n.text : n.type))).toEqual([
+      'First', 'Second', 'Third',
+    ]);
+  });
 });
 
 describe('activity parser — if/elseif/else', () => {

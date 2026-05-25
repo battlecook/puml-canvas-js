@@ -89,6 +89,7 @@ export function layoutState(ast: StateAst): Scene {
     sourceMarker: t.sourceMarker,
     targetMarker: t.targetMarker,
     label: t.label,
+    labelDirection: 'none',
   });
 
   const selfLoops = ast.transitions.filter((t) => t.source === t.target);

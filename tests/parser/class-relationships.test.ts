@@ -80,4 +80,39 @@ describe('class relationships — parser', () => {
     expect(ast.classes[0]?.members).toHaveLength(1);
     expect(ast.classes[1]?.id).toBe('B');
   });
+
+  it('accepts a single dash as a class association line', () => {
+    const ast = parseClass(
+      [
+        '@startuml',
+        'A - B',
+        'C *- D',
+        '@enduml',
+      ].join('\n'),
+    );
+    expect(ast.relationships).toHaveLength(2);
+    expect(ast.relationships[0]).toMatchObject({ source: 'A', target: 'B' });
+    expect(ast.relationships[1]).toMatchObject({ source: 'C', target: 'D' });
+    // Single-dash plain association
+    expect(ast.relationships[0]!.style).toBe('solid');
+    expect(ast.relationships[0]!.sourceMarker).toBe('none');
+    expect(ast.relationships[0]!.targetMarker).toBe('none');
+    // *- has composition diamond on left
+    expect(ast.relationships[1]!.sourceMarker).toBe('diamond-filled');
+  });
+
+  it('captures `<` start and `>` end of label as labelDirection', () => {
+    const ast = parseClass(
+      [
+        '@startuml',
+        'A - B : drives >',
+        'C - D : < owns',
+        'E - F : plain',
+        '@enduml',
+      ].join('\n'),
+    );
+    expect(ast.relationships[0]).toMatchObject({ label: 'drives', labelDirection: 'forward' });
+    expect(ast.relationships[1]).toMatchObject({ label: 'owns',   labelDirection: 'backward' });
+    expect(ast.relationships[2]).toMatchObject({ label: 'plain',  labelDirection: 'none' });
+  });
 });

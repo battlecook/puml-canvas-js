@@ -52,4 +52,49 @@ describe('detectKind', () => {
   it('detects state when first content is [*]', () => {
     expect(detect('@startuml\n[*] --> Active\n@enduml')).toBe('state');
   });
+
+  it('detects class diagram from class-style arrows when no keyword is present', () => {
+    // Inheritance triangle
+    expect(detect('@startuml\nA <|-- B\n@enduml')).toBe('class');
+    // Composition diamond
+    expect(detect('@startuml\nA *-- B\n@enduml')).toBe('class');
+    // Aggregation diamond
+    expect(detect('@startuml\nA o-- B\n@enduml')).toBe('class');
+    // Dashed dependency
+    expect(detect('@startuml\nA .. B\n@enduml')).toBe('class');
+  });
+
+  it('still picks sequence for plain ->/--> arrows with no class signatures', () => {
+    expect(detect('@startuml\nAlice -> Bob\n@enduml')).toBe('sequence');
+    expect(detect('@startuml\nAlice --> Bob\n@enduml')).toBe('sequence');
+  });
+
+  it('detects class for less-common arrow markers (+/#/x/}/^)', () => {
+    expect(detect('@startuml\nA +-- B\n@enduml')).toBe('class');
+    expect(detect('@startuml\nA #-- B\n@enduml')).toBe('class');
+    expect(detect('@startuml\nA x-- B\n@enduml')).toBe('class');
+    expect(detect('@startuml\nA }-- B\n@enduml')).toBe('class');
+    expect(detect('@startuml\nA ^-- B\n@enduml')).toBe('class');
+  });
+
+  it('detects class for plain dashes with no arrowhead (A - B, A -- B)', () => {
+    expect(detect('@startuml\nA - B\n@enduml')).toBe('class');
+    expect(detect('@startuml\nA -- B\n@enduml')).toBe('class');
+  });
+
+  it('keeps reverse sequence (A <- B) as sequence', () => {
+    expect(detect('@startuml\nAlice <- Bob\n@enduml')).toBe('sequence');
+    expect(detect('@startuml\nAlice <-- Bob\n@enduml')).toBe('sequence');
+  });
+
+  it('treats markdown-style `- Action` lines as activity (compatible-viewer extension)', () => {
+    const src = [
+      '@startuml',
+      '- Action 1',
+      '- Action 2',
+      '- Action 3',
+      '@enduml',
+    ].join('\n');
+    expect(detect(src)).toBe('activity');
+  });
 });

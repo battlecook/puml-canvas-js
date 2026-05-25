@@ -251,6 +251,7 @@ function sugiyamaArrange(
     sourceMarker: r.sourceMarker,
     targetMarker: r.targetMarker,
     label: r.label,
+    labelDirection: 'none',
   }));
 
   const edges = buildLayoutEdges(classRels);
@@ -356,6 +357,7 @@ function sugiyamaRows(
     sourceMarker: r.sourceMarker,
     targetMarker: r.targetMarker,
     label: r.label,
+    labelDirection: 'none',
   }));
   const edges = buildLayoutEdges(classRels);
   removeCycles(ids, edges);

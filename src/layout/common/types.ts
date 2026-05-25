@@ -1,4 +1,4 @@
-import type { EndMarker } from '../../ast/class.js';
+import type { EndMarker, LabelDirection } from '../../ast/class.js';
 
 export interface Position {
   x: number;
@@ -24,6 +24,7 @@ export interface EdgeAttrs {
   label: string;
   sourceMult?: string;
   targetMult?: string;
+  labelDirection?: LabelDirection;
 }
 
 export interface EdgeStyle {

@@ -8,6 +8,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The project is pre-1.0. While the public API is stable across patch releases,
 > minor releases (0.X.0) may introduce breaking changes until 1.0.0.
 
+## [0.4.0] - 2026-05-26
+
+### Added
+
+- **Richer sequence diagram syntax.** Sequence participants now support
+  per-participant colors (`actor Bob #red`, `participant X #99FF99`),
+  escaped multi-line labels (`"first\nsecond"`), and sectioned
+  `participant X [ ... ]` blocks with simple bold and monospace Creole-style
+  lines. Sequence AST exports now include participant section and arrow marker
+  types.
+- **Sequence arrow variants and coloring.** Message parsing/rendering now
+  supports open arrowheads (`->>`), bidirectional arrows (`<->`), half-arrow
+  forms (`-\`, `\\-`, `//--`), lost/found markers (`x`, `o`), and per-message
+  arrow colors via `-[#color]>` / `-[#hex]->`.
+- **Sequence page features.** Added `newpage`, inline/block `header` and
+  `footer`, shorthand `note left` / `note right` attached to the previous
+  message, block comments (`/' ... '/`), and literal `\n` handling in message
+  text.
+- **Advanced sequence autonumber.** `autonumber` now supports multi-level
+  counters (`1.1.1`), `inc A` / `inc B`, `stop`, `resume`, custom steps, and
+  format strings with simple HTML-like markup. Sequence labels and notes also
+  resolve `%autonumber%`, `<U+XXXX>` escapes, and basic bold/italic/underline
+  / font-color markup.
+- **Class `hide empty members` compact badges.** Empty classes render as
+  compact icon badges when the directive is present, while classes with
+  members keep the normal compartment box layout.
+- **Class label direction markers.** Relationship labels written as
+  `label >` or `< label` now preserve a `labelDirection` field and render a
+  small direction triangle beside the edge label.
+- **Activity dash action shorthand.** Lines like `- Action 1` inside
+  `@startuml` are accepted as activity action steps for compatibility with
+  PlantUML-like viewers that treat markdown-style lists as sequential flows.
+
+### Changed
+
+- **Diagram detection is less eager.** The dispatcher now keeps scanning after
+  unknown identifiers and uses arrow signatures to distinguish class-only
+  relationship diagrams from sequence diagrams. Plain `->` / `-->` still
+  falls back to sequence, while `<|`, `|>`, `*--`, `o--`, `..`, single-dash
+  class associations, and less-common class markers point to class diagrams.
+- **Class relationship parsing is more permissive.** Single-dash associations
+  (`A - B`) and non-standard marker forms such as `#--`, `x--`, `}--`, `+--`,
+  and `^--` now parse as relationships and degrade unsupported markers to
+  plain-line endpoints instead of dropping the edge.
+
+### Fixed
+
+- **Reverse sequence self-messages.** `A <- A` now renders the self-message loop
+  and label to the left of the lifeline, with extra left padding so the loop
+  and label are not clipped.
+- **Multi-line sequence labels.** Participant labels, regular message labels,
+  self-message labels, and note labels now split escaped `\n` into stacked
+  rendered text lines instead of showing a literal backslash-n.
+- **Class diagrams with relationship-only input.** Files that contain only
+  relationship lines such as `A - B`, `A *-- B`, or `A .. B` are no longer
+  misclassified as sequence diagrams.
+
+### Tests
+
+- Test suite grew from 305 → 356 cases. New coverage includes extended
+  sequence parser/layout features, class compact badges and label direction
+  markers, class-only detection heuristics, dash-action activity parsing, and
+  the updated reverse self-message golden snapshot.
+
 ## [0.3.0] - 2026-05-25
 
 ### Added
