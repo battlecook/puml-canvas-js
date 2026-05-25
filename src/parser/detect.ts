@@ -23,13 +23,10 @@ const NON_DISCRIMINATING = new Set([
 
 const UML_KEYWORD_TO_KIND: Record<string, DiagramKind> = {
   participant: 'sequence',
-  actor: 'sequence',
   boundary: 'sequence',
   control: 'sequence',
   entity: 'sequence',
-  database: 'sequence',
   collections: 'sequence',
-  queue: 'sequence',
   autonumber: 'sequence',
   hnote: 'sequence',
   rnote: 'sequence',
@@ -46,10 +43,27 @@ const UML_KEYWORD_TO_KIND: Record<string, DiagramKind> = {
 
   component: 'component',
   node: 'deployment',
+  cloud: 'deployment',
+  folder: 'deployment',
+  frame: 'deployment',
+  storage: 'deployment',
+  artifact: 'deployment',
 
   object: 'object',
 
   start: 'activity',
+};
+
+// Keywords that appear in multiple diagram types. Examples:
+// - `database`/`queue`: sequence participant OR deployment shape.
+// - `actor`: sequence participant OR usecase actor.
+// - `rectangle`: component container OR usecase system boundary OR deployment container.
+// Don't commit on first sight; let stronger downstream signals override.
+const WEAK_KEYWORD_TO_KIND: Record<string, DiagramKind> = {
+  actor: 'sequence',
+  database: 'sequence',
+  queue: 'sequence',
+  rectangle: 'component',
 };
 
 export interface DetectionResult {
@@ -82,6 +96,7 @@ export function detectKind(tokens: Token[]): DetectionResult {
     return { kind: mapped, wrapperStartIndex: startIdx, wrapperEndIndex: endIdx };
   }
 
+  let weakKind: DiagramKind | null = null;
   let i = startIdx + 1;
   while (i < tokens.length && (endIdx === -1 || i < endIdx)) {
     const t = tokens[i]!;
@@ -92,9 +107,15 @@ export function detectKind(tokens: Token[]): DetectionResult {
         i = skipToNextLine(tokens, i);
         continue;
       }
+      const weak = WEAK_KEYWORD_TO_KIND[lower];
+      if (weak !== undefined) {
+        if (weakKind === null) weakKind = weak;
+        i = skipToNextLine(tokens, i);
+        continue;
+      }
       const k = UML_KEYWORD_TO_KIND[lower];
       if (k) return { kind: k, wrapperStartIndex: startIdx, wrapperEndIndex: endIdx };
-      return { kind: 'sequence', wrapperStartIndex: startIdx, wrapperEndIndex: endIdx };
+      return { kind: weakKind ?? 'sequence', wrapperStartIndex: startIdx, wrapperEndIndex: endIdx };
     }
     if (t.kind === 'Symbol' && (t.value === '(' || t.value === '[')) {
       if (t.value === '[' && tokens[i + 1]?.kind === 'Symbol' && tokens[i + 1]?.value === '*') {
@@ -112,7 +133,7 @@ export function detectKind(tokens: Token[]): DetectionResult {
     i++;
   }
 
-  return { kind: 'sequence', wrapperStartIndex: startIdx, wrapperEndIndex: endIdx };
+  return { kind: weakKind ?? 'sequence', wrapperStartIndex: startIdx, wrapperEndIndex: endIdx };
 }
 
 function skipToNextLine(tokens: Token[], from: number): number {

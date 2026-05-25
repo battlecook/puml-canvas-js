@@ -458,16 +458,22 @@ function drawNote(
   laneIdx: Map<string, number>,
 ): { shapes: Shape[]; height: number } {
   const m = measureText(stmt.text, FONT_SIZE);
-  const noteW = m.width + NOTE_PAD_X * 2;
+  const textW = m.width + NOTE_PAD_X * 2;
   const noteH = m.height + NOTE_PAD_Y * 2;
 
   let x: number;
+  let noteW = textW;
   const idx1 = laneIdx.get(stmt.targets[0]) ?? 0;
   if (stmt.position === 'over') {
     if (stmt.targets.length === 2) {
       const idx2 = laneIdx.get(stmt.targets[1]) ?? idx1;
-      const cx = (laneCenters[idx1]! + laneCenters[idx2]!) / 2;
-      x = cx - noteW / 2;
+      const left = Math.min(idx1, idx2);
+      const right = Math.max(idx1, idx2);
+      const spanLeft = laneCenters[left]! - headerW[left]! / 2;
+      const spanRight = laneCenters[right]! + headerW[right]! / 2;
+      const spanW = spanRight - spanLeft;
+      noteW = Math.max(textW, spanW);
+      x = (spanLeft + spanRight) / 2 - noteW / 2;
     } else {
       x = laneCenters[idx1]! - noteW / 2;
     }

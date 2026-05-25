@@ -563,6 +563,19 @@ function layoutRepeat(node: RepeatNode): LayoutBox {
         });
       }
 
+      // no label near the downward exit arrow from diamond bottom
+      if (node.noLabel) {
+        shapes.push({
+          type: 'text',
+          x: dx + diamond.w / 2 + 4,
+          y: diamondY + diamond.h + FONT_LABEL,
+          text: node.noLabel,
+          anchor: 'start',
+          baseline: 'alphabetic',
+          font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
+        });
+      }
+
       return shapes;
     },
   };

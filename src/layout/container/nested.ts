@@ -65,7 +65,9 @@ export function layoutNested(ast: ContainerAst): Scene {
     rowMeta.push({ rowW, rowH, y: cursorY });
     cursorY += rowH + CHILD_GAP;
   }
-  const totalW = maxRowW + PAGE_PAD * 2;
+  const titleW = ast.title ? measureText(ast.title, TITLE_FONT).width : 0;
+  const contentW = Math.max(maxRowW, titleW);
+  const totalW = contentW + PAGE_PAD * 2;
   const totalH = cursorY - CHILD_GAP + PAGE_PAD;
 
   const positions = new Map<string, AbsPos>();
@@ -86,7 +88,7 @@ export function layoutNested(ast: ContainerAst): Scene {
   for (let r = 0; r < rows.length; r++) {
     const row = rows[r]!;
     const meta = rowMeta[r]!;
-    let cursorX = PAGE_PAD + (maxRowW - meta.rowW) / 2;
+    let cursorX = PAGE_PAD + (contentW - meta.rowW) / 2;
     for (const box of row.boxes) {
       shapes.push(...box.draw(cursorX, meta.y, positions));
       cursorX += box.w + CHILD_GAP;

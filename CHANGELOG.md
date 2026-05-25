@@ -12,6 +12,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [0.2.0] - 2026-05-25
+
+### Added
+
+- **Preprocessor warning banner.** When the source contains directives the
+  library does not implement (`!theme`, `!pragma`, `!include`, `!define`,
+  `!undef`, `!procedure`, `!function`, `!if`, `!while`, `!foreach`, `!$var`,
+  `!log`, `!assert`), a small yellow `Preprocessor not supported: …` banner
+  is drawn in the top-right corner of the SVG so the diagram author can tell
+  at a glance why the output differs from upstream PlantUML. Closing
+  directives (`!endif`, `!endprocedure`, …) are grouped under their opening
+  form to keep the banner concise. Implemented in
+  `src/preprocessor-warnings.ts`; exported as
+  `detectUnsupportedDirectives(source)` and
+  `applyPreprocessorWarningBanner(scene, directives)` for callers that need
+  to inspect or apply the warning manually.
+- **Demo page file picker.** The demo (`/demo`) now has an "Open file…"
+  control next to the sample buttons that loads a local `.puml` / `.plantuml`
+  / `.uml` / `.iuml` / `.wsd` / `.txt` file into the editor and re-renders
+  immediately.
+
+### Changed
+
+- **Demo page header simplified.** `<h1>` text changed from
+  "puml-canvas-js — Phase 9 (14 diagram types, ~96% coverage)" to plain
+  "puml-canvas-js".
+
+### Fixed
+
+- **`note over A, B` rendered too narrow.** The note used only the text width
+  and was centered between the two lanes, so a short label on widely-spaced
+  participants drew a tiny box in the middle instead of spanning them. It
+  now uses `max(text-width, span(A..B))` as the width and centers within
+  that span, matching upstream PlantUML. `src/layout/sequence/index.ts`.
+- **Deployment diagrams misclassified as sequence.** The diagram-type
+  dispatcher was missing several deployment shape keywords, so a file
+  starting with `cloud Internet` or `folder Logs` fell through to
+  `sequence`. Added `cloud`, `folder`, `frame`, `storage`, `artifact` as
+  strong deployment signals. `src/parser/detect.ts`.
+- **`actor` / `rectangle` / `database` / `queue` keywords used for routing
+  too eagerly.** These keywords appear in more than one diagram type
+  (`actor` in sequence and use case, `rectangle` in component, use case
+  and deployment, `database` / `queue` in sequence and deployment). The
+  dispatcher used to commit on first sight, which mis-routed e.g. a use
+  case diagram that opened with `actor User` to the sequence pipeline.
+  These are now *weak* keywords: they record a fallback but keep scanning,
+  so a stronger downstream signal (`usecase`, `node`, `cloud`, …) wins.
+  `src/parser/detect.ts`.
+- **`repeat while (…) is (yes) not (no)` dropped the "no" label.** The
+  parser captured both labels but `layoutRepeat` only drew the back-loop
+  "yes" label; the downward exit edge was unlabelled. Added the missing
+  text shape next to the diamond's bottom exit so the exit branch is
+  labelled the same as `while/endwhile`. `src/layout/activity/index.ts`.
+- **Container diagram titles clipped on wide titles.** The SVG width was
+  computed from row content only, so a title wider than the contents
+  (e.g. a long deployment-topology title above a narrow column of nodes)
+  was anchored at canvas center and clipped on both sides. Title width is
+  now used as a floor for the canvas width, and content rows re-center
+  on the widened canvas. Fixed in both
+  `src/layout/container/nested.ts` and `src/layout/container/index.ts`.
+
+### Tests
+
+- Test suite grew from 263 → 272 cases. New file
+  `tests/preprocessor-warnings.test.ts` covers directive detection
+  (grouping, ordering, false-positive guards) and banner placement.
+- Golden snapshots regenerated where the intended visual changed:
+  `tests/golden/fixtures/sequence/notes.svg` (shared `note over` now
+  spans both participant lanes) and
+  `tests/golden/fixtures/usecase/basic.svg` (a basic use case diagram
+  starting with `actor` previously captured the buggy sequence-style
+  render as its own golden; replaced with the correct
+  `<ellipse>`-based use case render).
+
 ## [0.1.0] - 2026-05-25
 
 Initial public release. The package is feature-complete for the 14 most common
@@ -150,5 +224,6 @@ syntax specification. No code, assets, fonts, or sprites are derived from
 the upstream PlantUML project (GPL-3.0-licensed). Diagram inputs follow the
 syntax documented at plantuml.com.
 
-[Unreleased]: https://github.com/battlecook/puml-canvas-js/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/battlecook/puml-canvas-js/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/battlecook/puml-canvas-js/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/battlecook/puml-canvas-js/releases/tag/v0.1.0

@@ -107,7 +107,8 @@ export function layoutContainer(ast: ContainerAst): Scene {
       : layeredLayout(ast, sizes, titleHeight, nonLoops.map(asRel));
 
   const extraRight = selfLoopExtraWidth(selfLoops, base.positions, sizes);
-  const totalWidth = base.width + extraRight;
+  const titleW = ast.title ? measureText(ast.title, TITLE_FONT).width + PAGE_PAD * 2 : 0;
+  const totalWidth = Math.max(base.width + extraRight, titleW);
 
   if (ast.title) {
     shapes.push({

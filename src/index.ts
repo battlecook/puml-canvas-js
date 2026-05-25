@@ -3,6 +3,10 @@ import { layout } from './layout/index.js';
 import { SvgRenderer } from './render/svg/index.js';
 import type { Scene } from './scene/types.js';
 import type { DiagramAst } from './ast/index.js';
+import {
+  applyPreprocessorWarningBanner,
+  detectUnsupportedDirectives,
+} from './preprocessor-warnings.js';
 
 export interface RenderOptions {
   document?: Document;
@@ -16,7 +20,9 @@ export function render(source: string, opts: RenderOptions = {}): SVGSVGElement 
 
 export function compile(source: string): Scene {
   const ast = parse(source);
-  return layout(ast);
+  const scene = layout(ast);
+  const directives = detectUnsupportedDirectives(source);
+  return applyPreprocessorWarningBanner(scene, directives);
 }
 
 export function parseToAst(source: string): DiagramAst {
@@ -44,6 +50,10 @@ export {
 } from './parser/index.js';
 export { layout } from './layout/index.js';
 export { SvgRenderer } from './render/svg/index.js';
+export {
+  detectUnsupportedDirectives,
+  applyPreprocessorWarningBanner,
+} from './preprocessor-warnings.js';
 export type { Token, TokenKind, Position } from './lexer/index.js';
 export type {
   DiagramAst,

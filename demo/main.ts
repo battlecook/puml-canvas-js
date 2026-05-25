@@ -343,6 +343,18 @@ document.querySelectorAll<HTMLButtonElement>('button[data-sample]').forEach((btn
   });
 });
 
+const fileEl = document.getElementById('file') as HTMLInputElement | null;
+fileEl?.addEventListener('change', async () => {
+  const file = fileEl.files?.[0];
+  if (!file) return;
+  try {
+    srcEl.value = await file.text();
+    update();
+  } finally {
+    fileEl.value = '';
+  }
+});
+
 srcEl.value = SAMPLES['sequence']!;
 srcEl.addEventListener('input', update);
 update();
