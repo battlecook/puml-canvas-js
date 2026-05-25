@@ -12,6 +12,7 @@ import {
   insertDummies,
   minimizeCrossings,
   removeCycles,
+  assignCoordinates,
   type LayoutEdge,
 } from '../class/sugiyama.js';
 import {
@@ -35,6 +36,9 @@ const UC_PAD_X = 16;
 const UC_PAD_Y = 8;
 const UC_MIN_W = 90;
 const UC_MIN_H = 38;
+const CONTAINER_PAD = 14;
+const CONTAINER_HEADER_H = 22;
+const CONTAINER_LABEL_FONT = 13;
 
 const FONT_FAMILY = 'sans-serif';
 const FONT_LABEL = 12;
@@ -44,6 +48,7 @@ const COLOR_LINE = '#222';
 const COLOR_EDGE = '#444';
 const COLOR_FILL_ACTOR = '#fefece';
 const COLOR_FILL_UC = '#fefece';
+const COLOR_CONTAINER_STROKE = '#999';
 
 const EDGE_STYLE: EdgeStyle = {
   color: COLOR_EDGE,
@@ -58,6 +63,10 @@ export function layoutUseCase(ast: UseCaseAst): Scene {
 
   const sizes = new Map(ast.nodes.map((n) => [n.id, measureNode(n)]));
   const titleHeight = ast.title ? TITLE_FONT + TITLE_GAP : 0;
+  const containerTopReserve = ast.containers.length > 0
+    ? CONTAINER_HEADER_H + CONTAINER_PAD
+    : 0;
+  const layoutTitleHeight = titleHeight + containerTopReserve;
 
   const asRel = (r: UCRelationship): ClassRelationship => ({
     source: r.source,
@@ -79,11 +88,12 @@ export function layoutUseCase(ast: UseCaseAst): Scene {
 
   const base =
     nonLoops.length === 0
-      ? gridLayout(ast, sizes, titleHeight)
-      : layeredLayout(ast, sizes, titleHeight, nonLoops.map(asRel));
+      ? gridLayout(ast, sizes, layoutTitleHeight)
+      : layeredLayout(ast, sizes, layoutTitleHeight, nonLoops.map(asRel));
 
   const extraRight = selfLoopExtraWidth(selfLoops, base.positions, sizes);
-  const totalWidth = base.width + extraRight;
+  let totalWidth = base.width + extraRight;
+  let totalHeight = base.height;
 
   if (ast.title) {
     shapes.push({
@@ -95,6 +105,45 @@ export function layoutUseCase(ast: UseCaseAst): Scene {
       baseline: 'alphabetic',
       font: { family: FONT_FAMILY, size: TITLE_FONT, weight: 'bold', color: '#000' },
     });
+  }
+
+  for (const container of ast.containers) {
+    const bbox = childBoundingBox(container.childIds, base.positions, sizes);
+    if (!bbox) continue;
+    const rectX = bbox.minX - CONTAINER_PAD;
+    const rectY = bbox.minY - CONTAINER_PAD - CONTAINER_HEADER_H;
+    const rectW = bbox.maxX - bbox.minX + CONTAINER_PAD * 2;
+    const rectH = bbox.maxY - bbox.minY + CONTAINER_PAD * 2 + CONTAINER_HEADER_H;
+    shapes.push({
+      type: 'rect',
+      x: rectX,
+      y: rectY,
+      w: rectW,
+      h: rectH,
+      style: {
+        fill: 'none',
+        stroke: COLOR_CONTAINER_STROKE,
+        strokeWidth: 1,
+      },
+    });
+    if (container.label) {
+      shapes.push({
+        type: 'text',
+        x: rectX + CONTAINER_PAD,
+        y: rectY + CONTAINER_HEADER_H - 6,
+        text: container.label,
+        anchor: 'start',
+        baseline: 'alphabetic',
+        font: {
+          family: FONT_FAMILY,
+          size: CONTAINER_LABEL_FONT,
+          weight: 'bold',
+          color: '#444',
+        },
+      });
+    }
+    totalWidth = Math.max(totalWidth, rectX + rectW + PAGE_PAD);
+    totalHeight = Math.max(totalHeight, rectY + rectH + PAGE_PAD);
   }
 
   if (base.drawable) {
@@ -143,10 +192,33 @@ export function layoutUseCase(ast: UseCaseAst): Scene {
 
   return {
     width: totalWidth,
-    height: base.height,
+    height: totalHeight,
     background: '#fff',
     children: shapes,
   };
+}
+
+function childBoundingBox(
+  ids: string[],
+  positions: Map<string, Position>,
+  sizes: Map<string, BoxSize>,
+): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let found = false;
+  for (const id of ids) {
+    const pos = positions.get(id);
+    const sz = sizes.get(id);
+    if (!pos || !sz) continue;
+    found = true;
+    if (pos.x < minX) minX = pos.x;
+    if (pos.y < minY) minY = pos.y;
+    if (pos.x + sz.w > maxX) maxX = pos.x + sz.w;
+    if (pos.y + sz.h > maxY) maxY = pos.y + sz.h;
+  }
+  return found ? { minX, minY, maxX, maxY } : null;
 }
 
 interface BaseResult {
@@ -197,20 +269,15 @@ function layeredLayout(
     return h;
   });
 
-  const layerWidths = ordered.map((layer) => {
-    let w = 0;
-    let prev: 'box' | 'dummy' | null = null;
-    for (const id of layer) {
-      const isDummy = dummy.dummyIds.has(id);
-      const nodeW = isDummy ? 0 : sizes.get(id)!.w;
-      if (prev !== null) w += isDummy || prev === 'dummy' ? DUMMY_GAP : HORIZONTAL_GAP;
-      w += nodeW;
-      prev = isDummy ? 'dummy' : 'box';
-    }
-    return w;
+  const coords = assignCoordinates({
+    orderedLayers: ordered,
+    segments: dummy.segments,
+    widthOf: (id) => sizes.get(id)?.w ?? 0,
+    dummyIds: dummy.dummyIds,
+    horizontalGap: HORIZONTAL_GAP,
+    dummyGap: DUMMY_GAP,
   });
-
-  const maxW = layerWidths.length > 0 ? Math.max(...layerWidths) : 200;
+  const maxW = coords.maxLayerWidth > 0 ? coords.maxLayerWidth : 200;
   const totalW = maxW + PAGE_PAD * 2;
 
   const positions = new Map<string, Position>();
@@ -219,23 +286,17 @@ function layeredLayout(
   let cursorY = PAGE_PAD + titleHeight;
   for (let l = 0; l < ordered.length; l++) {
     const layer = ordered[l]!;
-    const layerW = layerWidths[l]!;
     const layerH = layerHeights[l]!;
-    let cursorX = PAGE_PAD + (maxW - layerW) / 2;
-    let prev: 'box' | 'dummy' | null = null;
     for (const id of layer) {
+      const cx = PAGE_PAD + coords.centerX.get(id)!;
       const isDummy = dummy.dummyIds.has(id);
-      const nodeW = isDummy ? 0 : sizes.get(id)!.w;
-      if (prev !== null) cursorX += isDummy || prev === 'dummy' ? DUMMY_GAP : HORIZONTAL_GAP;
       if (isDummy) {
-        centers.set(id, { cx: cursorX, cy: cursorY + layerH / 2 });
+        centers.set(id, { cx, cy: cursorY + layerH / 2 });
       } else {
         const sz = sizes.get(id)!;
-        positions.set(id, { x: cursorX, y: cursorY });
-        centers.set(id, { cx: cursorX + sz.w / 2, cy: cursorY + sz.h / 2 });
+        positions.set(id, { x: cx - sz.w / 2, y: cursorY });
+        centers.set(id, { cx, cy: cursorY + sz.h / 2 });
       }
-      cursorX += nodeW;
-      prev = isDummy ? 'dummy' : 'box';
     }
     cursorY += layerH + LAYER_GAP;
   }

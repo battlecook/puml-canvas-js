@@ -1,4 +1,5 @@
 import type {
+  UCContainer,
   UCNode,
   UCNodeKind,
   UCRelationship,
@@ -22,10 +23,25 @@ const USECASE_DECL = new RegExp(
 );
 const ACTOR_SHORT = /^:([^:]+):(?:\s+as\s+(\S+))?\s*$/;
 const USECASE_SHORT = /^\(([^)]+)\)(?:\s+as\s+(\S+))?\s*$/;
+const CONTAINER_OPEN = new RegExp(
+  String.raw`^(rectangle|package|node|frame|cloud|folder)\s+` +
+    NAME +
+    String.raw`(?:\s+as\s+(\S+))?\s*\{\s*$`,
+  'i',
+);
+const CONTAINER_CLOSE = /^\}\s*$/;
 
 export function parseUseCase(source: string): UseCaseAst {
-  const ast: UseCaseAst = { kind: 'usecase', title: '', nodes: [], relationships: [] };
+  const ast: UseCaseAst = {
+    kind: 'usecase',
+    title: '',
+    nodes: [],
+    containers: [],
+    relationships: [],
+  };
   const byId = new Map<string, UCNode>();
+  const containerStack: UCContainer[] = [];
+  let anonCounter = 0;
   const lines = source.split(/\r\n|\r|\n/);
 
   const upsert = (n: UCNode): UCNode => {
@@ -33,6 +49,8 @@ export function parseUseCase(source: string): UseCaseAst {
     if (existing) return existing;
     byId.set(n.id, n);
     ast.nodes.push(n);
+    const top = containerStack[containerStack.length - 1];
+    if (top) top.childIds.push(n.id);
     return n;
   };
 
@@ -49,6 +67,18 @@ export function parseUseCase(source: string): UseCaseAst {
     }
 
     let m: RegExpExecArray | null;
+    if ((m = CONTAINER_OPEN.exec(text))) {
+      const label = (m[2] ?? m[3] ?? '').trim();
+      const id = m[4] ?? (label || `__uc_container_${anonCounter++}`);
+      const container: UCContainer = { id, label, childIds: [] };
+      ast.containers.push(container);
+      containerStack.push(container);
+      continue;
+    }
+    if (CONTAINER_CLOSE.test(text)) {
+      containerStack.pop();
+      continue;
+    }
     if ((m = ACTOR_DECL.exec(text))) {
       const name = (m[1] ?? m[2] ?? '').trim();
       const id = m[3] ?? name;

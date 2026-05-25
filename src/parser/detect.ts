@@ -52,6 +52,11 @@ const UML_KEYWORD_TO_KIND: Record<string, DiagramKind> = {
   object: 'object',
 
   start: 'activity',
+
+  robust: 'timing',
+  concise: 'timing',
+  binary: 'timing',
+  clock: 'timing',
 };
 
 // Keywords that appear in multiple diagram types. Examples:

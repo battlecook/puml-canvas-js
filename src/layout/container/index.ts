@@ -14,6 +14,7 @@ import {
   insertDummies,
   minimizeCrossings,
   removeCycles,
+  assignCoordinates,
   type LayoutEdge,
 } from '../class/sugiyama.js';
 import {
@@ -222,20 +223,15 @@ function layeredLayout(
     return h;
   });
 
-  const layerWidths = ordered.map((layer) => {
-    let w = 0;
-    let prev: 'box' | 'dummy' | null = null;
-    for (const id of layer) {
-      const isDummy = dummy.dummyIds.has(id);
-      const nodeW = isDummy ? 0 : sizes.get(id)!.w;
-      if (prev !== null) w += isDummy || prev === 'dummy' ? DUMMY_GAP : HORIZONTAL_GAP;
-      w += nodeW;
-      prev = isDummy ? 'dummy' : 'box';
-    }
-    return w;
+  const coords = assignCoordinates({
+    orderedLayers: ordered,
+    segments: dummy.segments,
+    widthOf: (id) => sizes.get(id)?.w ?? 0,
+    dummyIds: dummy.dummyIds,
+    horizontalGap: HORIZONTAL_GAP,
+    dummyGap: DUMMY_GAP,
   });
-
-  const maxW = layerWidths.length > 0 ? Math.max(...layerWidths) : 200;
+  const maxW = coords.maxLayerWidth > 0 ? coords.maxLayerWidth : 200;
   const totalW = maxW + PAGE_PAD * 2;
 
   const positions = new Map<string, Position>();
@@ -244,23 +240,17 @@ function layeredLayout(
   let cursorY = PAGE_PAD + titleHeight;
   for (let l = 0; l < ordered.length; l++) {
     const layer = ordered[l]!;
-    const layerW = layerWidths[l]!;
     const layerH = layerHeights[l]!;
-    let cursorX = PAGE_PAD + (maxW - layerW) / 2;
-    let prev: 'box' | 'dummy' | null = null;
     for (const id of layer) {
+      const cx = PAGE_PAD + coords.centerX.get(id)!;
       const isDummy = dummy.dummyIds.has(id);
-      const nodeW = isDummy ? 0 : sizes.get(id)!.w;
-      if (prev !== null) cursorX += isDummy || prev === 'dummy' ? DUMMY_GAP : HORIZONTAL_GAP;
       if (isDummy) {
-        centers.set(id, { cx: cursorX, cy: cursorY + layerH / 2 });
+        centers.set(id, { cx, cy: cursorY + layerH / 2 });
       } else {
         const sz = sizes.get(id)!;
-        positions.set(id, { x: cursorX, y: cursorY });
-        centers.set(id, { cx: cursorX + sz.w / 2, cy: cursorY + sz.h / 2 });
+        positions.set(id, { x: cx - sz.w / 2, y: cursorY });
+        centers.set(id, { cx, cy: cursorY + sz.h / 2 });
       }
-      cursorX += nodeW;
-      prev = isDummy ? 'dummy' : 'box';
     }
     cursorY += layerH + LAYER_GAP;
   }

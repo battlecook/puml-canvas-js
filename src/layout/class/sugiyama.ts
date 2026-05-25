@@ -271,3 +271,141 @@ function countLayerCrossings(
   }
   return count;
 }
+
+export interface CoordinateInput {
+  orderedLayers: string[][];
+  segments: LayoutSegment[];
+  widthOf: (id: string) => number;
+  dummyIds: Set<string>;
+  horizontalGap: number;
+  dummyGap: number;
+  iterations?: number;
+}
+
+export interface CoordinateResult {
+  centerX: Map<string, number>;
+  layerWidths: number[];
+  maxLayerWidth: number;
+}
+
+/**
+ * Coordinate assignment with dummy-node straightening.
+ *
+ * Strategy:
+ *   1. Compute the mechanical sequential x for every node — this matches what
+ *      the caller's old cursor-based loop produced, including the per-layer
+ *      centering inside `maxMechanicalWidth`. Real-node positions and overall
+ *      diagram width come out identical to the legacy behaviour.
+ *   2. Then iterate a relaxation pass that ONLY moves dummies. Each dummy's
+ *      ideal x is the centroid of its segment neighbours; we clamp it between
+ *      its left/right siblings in the same layer (real nodes act as fixed
+ *      walls). This straightens long-edge waypoints onto the line between
+ *      the real endpoints whenever the layer has room — without disturbing
+ *      any real-node layout that existing diagrams already depend on.
+ */
+export function assignCoordinates(input: CoordinateInput): CoordinateResult {
+  const {
+    orderedLayers,
+    segments,
+    widthOf,
+    dummyIds,
+    horizontalGap,
+    dummyGap,
+    iterations = 6,
+  } = input;
+
+  const centerX = new Map<string, number>();
+  const layerOf = new Map<string, number>();
+  for (let l = 0; l < orderedLayers.length; l++) {
+    for (const id of orderedLayers[l]!) layerOf.set(id, l);
+  }
+
+  const mechanicalWidths = orderedLayers.map((layer) => {
+    let w = 0;
+    let prev: 'box' | 'dummy' | null = null;
+    for (const id of layer) {
+      const isDummy = dummyIds.has(id);
+      const nodeW = isDummy ? 0 : widthOf(id);
+      if (prev !== null) w += isDummy || prev === 'dummy' ? dummyGap : horizontalGap;
+      w += nodeW;
+      prev = isDummy ? 'dummy' : 'box';
+    }
+    return w;
+  });
+  const maxLayerWidth = mechanicalWidths.length === 0 ? 0 : Math.max(...mechanicalWidths);
+
+  // Per-layer-centered mechanical placement (matches legacy cursor loop)
+  for (let l = 0; l < orderedLayers.length; l++) {
+    const layer = orderedLayers[l]!;
+    const layerW = mechanicalWidths[l]!;
+    let cursor = (maxLayerWidth - layerW) / 2;
+    let prev: 'box' | 'dummy' | null = null;
+    for (const id of layer) {
+      const isDummy = dummyIds.has(id);
+      const w = isDummy ? 0 : widthOf(id);
+      if (prev !== null) cursor += isDummy || prev === 'dummy' ? dummyGap : horizontalGap;
+      centerX.set(id, cursor + w / 2);
+      cursor += w;
+      prev = isDummy ? 'dummy' : 'box';
+    }
+  }
+
+  // Segment-neighbour adjacency for dummies
+  const neighbors = new Map<string, string[]>();
+  for (const layer of orderedLayers) {
+    for (const id of layer) {
+      if (dummyIds.has(id)) neighbors.set(id, []);
+    }
+  }
+  for (const seg of segments) {
+    if (dummyIds.has(seg.from)) neighbors.get(seg.from)!.push(seg.to);
+    if (dummyIds.has(seg.to)) neighbors.get(seg.to)!.push(seg.from);
+  }
+
+  const minGapBetween = (left: string, right: string): number => {
+    const ld = dummyIds.has(left);
+    const rd = dummyIds.has(right);
+    return ld || rd ? dummyGap : horizontalGap;
+  };
+
+  const relaxDummiesInLayer = (layer: string[]): void => {
+    for (let i = 0; i < layer.length; i++) {
+      const id = layer[i]!;
+      if (!dummyIds.has(id)) continue;
+      const ns = neighbors.get(id) ?? [];
+      if (ns.length === 0) continue;
+      let sum = 0;
+      for (const n of ns) sum += centerX.get(n)!;
+      const ideal = sum / ns.length;
+
+      // Lower bound from left sibling
+      let lo = -Infinity;
+      if (i > 0) {
+        const left = layer[i - 1]!;
+        const lw = dummyIds.has(left) ? 0 : widthOf(left);
+        lo = centerX.get(left)! + lw / 2 + minGapBetween(left, id);
+      }
+      // Upper bound from right sibling
+      let hi = Infinity;
+      if (i < layer.length - 1) {
+        const right = layer[i + 1]!;
+        const rw = dummyIds.has(right) ? 0 : widthOf(right);
+        hi = centerX.get(right)! - rw / 2 - minGapBetween(id, right);
+      }
+
+      const clamped = Math.min(Math.max(ideal, lo), hi);
+      centerX.set(id, clamped);
+    }
+  };
+
+  for (let iter = 0; iter < iterations; iter++) {
+    for (let l = 0; l < orderedLayers.length; l++) {
+      relaxDummiesInLayer(orderedLayers[l]!);
+    }
+    for (let l = orderedLayers.length - 1; l >= 0; l--) {
+      relaxDummiesInLayer(orderedLayers[l]!);
+    }
+  }
+
+  return { centerX, layerWidths: mechanicalWidths, maxLayerWidth };
+}

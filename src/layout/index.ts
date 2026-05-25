@@ -10,7 +10,9 @@ import { layoutWbs } from './tree/wbs.js';
 import { layoutMindmap } from './tree/mindmap.js';
 import { layoutGantt } from './gantt/index.js';
 import { layoutJson } from './json/index.js';
+import { layoutYaml } from './yaml/index.js';
 import { layoutEbnf, layoutRegex } from './grammar/index.js';
+import { layoutTiming } from './timing/index.js';
 
 export function layout(ast: DiagramAst): Scene {
   switch (ast.kind) {
@@ -26,8 +28,10 @@ export function layout(ast: DiagramAst): Scene {
     case 'wbs':        return layoutWbs(ast);
     case 'gantt':      return layoutGantt(ast);
     case 'json':       return layoutJson(ast);
+    case 'yaml':       return layoutYaml(ast);
     case 'ebnf':       return layoutEbnf(ast);
     case 'regex':      return layoutRegex(ast);
+    case 'timing':     return layoutTiming(ast);
     case 'unknown':
     case 'placeholder': return layoutPlaceholder(ast);
   }

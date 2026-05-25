@@ -9,6 +9,7 @@ import type { Scene, Shape, Style } from '../../scene/types.js';
 import { measureText } from '../sequence/measure.js';
 import { drawMarker, markerLength, shortenPolyline, type Vec } from '../class/markers.js';
 import { assignLayers, buildLayoutEdges, removeCycles } from '../class/sugiyama.js';
+import { computeLateralOffsets } from '../common/edges.js';
 
 const PAGE_PAD = 16;
 const TITLE_FONT = 16;
@@ -95,8 +96,17 @@ export function layoutNested(ast: ContainerAst): Scene {
     }
   }
 
-  for (const rel of ast.relationships) {
-    shapes.push(...drawNestedEdge(rel, positions));
+  const parentOf = buildParentMap(ast);
+  const edgeItems = ast.relationships.map((rel) => ({
+    fromId: rel.source,
+    toId: rel.target,
+    rel,
+  }));
+  const offsets = computeLateralOffsets(edgeItems);
+  for (const item of edgeItems) {
+    shapes.push(
+      ...drawNestedEdge(item.rel, positions, parentOf, offsets.get(item) ?? 0),
+    );
   }
 
   return {
@@ -105,6 +115,38 @@ export function layoutNested(ast: ContainerAst): Scene {
     background: '#fff',
     children: shapes,
   };
+}
+
+function buildParentMap(ast: ContainerAst): Map<string, string | null> {
+  const parentOf = new Map<string, string | null>();
+  const walk = (node: ContainerNode, parentId: string | null): void => {
+    parentOf.set(node.id, parentId);
+    for (const c of node.children) walk(c, node.id);
+  };
+  for (const top of ast.nodes) walk(top, null);
+  return parentOf;
+}
+
+function clipBoxId(
+  srcId: string,
+  tgtId: string,
+  parentOf: Map<string, string | null>,
+): string {
+  const tgtChain = new Set<string>();
+  let cur: string | null = tgtId;
+  while (cur !== null) {
+    tgtChain.add(cur);
+    cur = parentOf.get(cur) ?? null;
+  }
+  if (tgtChain.has(srcId)) return srcId;
+  let result = srcId;
+  cur = parentOf.get(srcId) ?? null;
+  while (cur !== null) {
+    if (tgtChain.has(cur)) break;
+    result = cur;
+    cur = parentOf.get(cur) ?? null;
+  }
+  return result;
 }
 
 function layoutContainerNode(node: ContainerNode, allRels: ContainerRelationship[]): Box {
@@ -131,6 +173,7 @@ function layoutContainerNode(node: ContainerNode, allRels: ContainerRelationship
     h,
     draw(x, y, posMap) {
       const shapes: Shape[] = [];
+      posMap.set(node.id, { x, y, w, h });
       shapes.push(...drawContainerFrame(node, x, y, w, h, headerText));
 
       const innerOriginX = x + CONTAINER_PAD;
@@ -792,9 +835,13 @@ function stereotypeFor(k: ContainerNodeKind): string {
 function drawNestedEdge(
   rel: ContainerRelationship,
   positions: Map<string, AbsPos>,
+  parentOf: Map<string, string | null>,
+  lateralOffset: number,
 ): Shape[] {
-  const src = positions.get(rel.source);
-  const tgt = positions.get(rel.target);
+  const srcClipId = clipBoxId(rel.source, rel.target, parentOf);
+  const tgtClipId = clipBoxId(rel.target, rel.source, parentOf);
+  const src = positions.get(srcClipId);
+  const tgt = positions.get(tgtClipId);
   if (!src || !tgt) return [];
 
   const sCx = src.x + src.w / 2;
@@ -805,9 +852,9 @@ function drawNestedEdge(
   const p1 = rectClip(sCx, sCy, src.w, src.h, tCx, tCy);
   const p2 = rectClip(tCx, tCy, tgt.w, tgt.h, sCx, sCy);
 
-  const start: Vec = { x: p1.x, y: p1.y };
-  const end: Vec = { x: p2.x, y: p2.y };
-  const original = [start, end];
+  const start = applyLateralOffset(p1, p2, lateralOffset);
+  const end = applyLateralOffset(p2, p1, -lateralOffset);
+  const original: Vec[] = [start, end];
   const shortened = shortenPolyline(original, markerLength(rel.sourceMarker), markerLength(rel.targetMarker));
 
   const lineStyle: Style =
@@ -842,6 +889,17 @@ function drawNestedEdge(
   }
 
   return shapes;
+}
+
+function applyLateralOffset(point: Vec, other: Vec, offset: number): Vec {
+  if (offset === 0) return { x: point.x, y: point.y };
+  const dx = other.x - point.x;
+  const dy = other.y - point.y;
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return { x: point.x, y: point.y };
+  const px = -dy / len;
+  const py = dx / len;
+  return { x: point.x + px * offset, y: point.y + py * offset };
 }
 
 function rectClip(

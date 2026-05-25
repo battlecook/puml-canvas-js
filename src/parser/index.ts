@@ -13,8 +13,10 @@ import { parseMindmap } from './mindmap/index.js';
 import { parseWbs } from './wbs/index.js';
 import { parseGantt } from './gantt/index.js';
 import { parseJson } from './json/index.js';
+import { parseYaml } from './yaml/index.js';
 import { parseEbnf } from './grammar/ebnf.js';
 import { parseRegex } from './grammar/regex.js';
+import { parseTiming } from './timing/index.js';
 
 export function parse(source: string): DiagramAst {
   const detection = detectKind(tokenize(source));
@@ -71,12 +73,20 @@ export function parse(source: string): DiagramAst {
     return parseJson(source);
   }
 
+  if (detection.kind === 'yaml') {
+    return parseYaml(source);
+  }
+
   if (detection.kind === 'ebnf') {
     return parseEbnf(source);
   }
 
   if (detection.kind === 'regex') {
     return parseRegex(source);
+  }
+
+  if (detection.kind === 'timing') {
+    return parseTiming(source);
   }
 
   return {
@@ -99,5 +109,7 @@ export { parseMindmap } from './mindmap/index.js';
 export { parseWbs } from './wbs/index.js';
 export { parseGantt } from './gantt/index.js';
 export { parseJson } from './json/index.js';
+export { parseYaml } from './yaml/index.js';
 export { parseEbnf } from './grammar/ebnf.js';
 export { parseRegex } from './grammar/regex.js';
+export { parseTiming } from './timing/index.js';

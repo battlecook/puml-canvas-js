@@ -8,9 +8,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The project is pre-1.0. While the public API is stable across patch releases,
 > minor releases (0.X.0) may introduce breaking changes until 1.0.0.
 
-## [Unreleased]
+## [0.3.0] - 2026-05-25
 
-_Nothing yet._
+### Added
+
+- **Timing diagrams.** `robust`, `concise`, `binary`, and `clock` lines are now
+  detected as `timing` diagrams and wired through the public parser/layout
+  pipeline. The parser handles quoted track names, aliases, `@time` and
+  relative `@+N` markers, quoted multi-word states, implicit concise tracks for
+  undeclared references, and `clock ... with period N`. The layout renders
+  state lanes, binary signal traces, clock ticks, a shared time axis, title
+  text, label truncation for narrow segments, and overlap-pruned tick labels.
+  Public exports include `parseTiming`, `TimingAst`, `TimingTrack`,
+  `TimingTrackKind`, and `TimingEvent`.
+- **YAML diagrams.** `@startyaml` now renders as a key-value tree instead of a
+  placeholder, reusing the JSON table graph layout. The built-in YAML parser
+  supports plain mappings and sequences, quoted scalars, numbers, booleans,
+  nulls, inline flow arrays/objects, comments, block scalars, anchors,
+  aliases, `<<` merge keys, `title`, and `#highlight "path" / "segments"`.
+  Public exports include `parseYaml` and `YamlAst`.
+- **Use case system boundaries.** Use case diagrams now parse and render
+  `rectangle`, `package`, `node`, `frame`, `cloud`, and `folder` container
+  blocks, preserving child use cases inside a labelled boundary rectangle.
+  `UCContainer` is exported as part of the public AST surface.
+- **Deployment component shorthand in nested blocks.** Deployment diagrams now
+  accept `[Component]` shorthand inside container blocks and normalize
+  `[Component]` relationship endpoints, including nested deployment examples
+  such as web/database/cloud nodes containing component children.
+
+### Changed
+
+- **Shared key-value tree layout.** JSON layout now exposes a reusable
+  `layoutKvTree` helper so YAML and JSON share the same graph-of-tables
+  renderer while keeping diagram-specific parse error labels.
+- **Long-edge coordinate assignment.** Class, use case, state, and container
+  layered layouts now share `assignCoordinates`, which preserves existing
+  real-node placement while relaxing dummy nodes toward their segment
+  neighbours. This keeps long edges straighter without shifting established
+  box positions.
+
+### Fixed
+
+- **Activity branch labels no longer sit on diagonal arrows.** Labels on
+  diagonal `if` / `else` branch arrows are now offset perpendicular to the
+  line, while near-vertical arrows keep the previous side-label placement.
+  Golden snapshots for affected activity diagrams were updated.
+- **Nested container edge clipping.** Edges between nodes inside different
+  top-level deployment/container boxes now clip at the outer ancestor boundary
+  instead of the inner leaf, so cross-container arrows do not run through
+  sibling content inside the source container.
+- **Parallel nested container edges.** Multiple edges declared between the same
+  nested node pair now receive lateral offsets instead of being drawn directly
+  on top of one another.
+
+### Tests
+
+- Test suite grew from 272 → 305 cases. New coverage includes timing parser
+  and layout behaviour, YAML parsing/rendering/highlighting, use case
+  containers, deployment `[Component]` shorthand in nested blocks, nested
+  container edge clipping/parallel routing, and Sugiyama dummy coordinate
+  straightening.
 
 ## [0.2.0] - 2026-05-25
 

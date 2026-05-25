@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   assignLayers,
+  assignCoordinates,
   buildLayoutEdges,
   countCrossings,
   groupByLayer,
@@ -168,5 +169,58 @@ describe('sugiyama — groupByLayer', () => {
     ]);
     const groups = groupByLayer(['a', 'b', 'c', 'd'], layers);
     expect(groups).toEqual([['a'], ['b', 'c'], ['d']]);
+  });
+});
+
+describe('sugiyama — assignCoordinates dummy straightening', () => {
+  it('pulls a dummy onto the line between its endpoints when the layer has room', () => {
+    // Edge A → C spans 2 layers, so 1 dummy is inserted at the middle layer.
+    // The middle layer contains nothing else, so the dummy must end up at A's
+    // (= C's) center x for a fully straight long edge.
+    const dummyIds = new Set(['__d']);
+    const orderedLayers = [['A'], ['__d'], ['C']];
+    const segments = [
+      { from: 'A', to: '__d', parentEdgeIdx: 0 },
+      { from: '__d', to: 'C', parentEdgeIdx: 0 },
+    ];
+    const widths = new Map<string, number>([['A', 100], ['C', 100]]);
+
+    const coords = assignCoordinates({
+      orderedLayers,
+      segments,
+      widthOf: (id) => widths.get(id) ?? 0,
+      dummyIds,
+      horizontalGap: 30,
+      dummyGap: 12,
+    });
+
+    expect(coords.centerX.get('A')!).toBeCloseTo(coords.centerX.get('C')!);
+    expect(coords.centerX.get('__d')!).toBeCloseTo(coords.centerX.get('A')!);
+  });
+
+  it('keeps real-node positions even when a dummy in the same layer cannot reach its ideal', () => {
+    // Layer 1 has both a real node X (real, anchored) and a dummy. The dummy
+    // wants to be at A's column (60) but is blocked by X to its left. Real
+    // node X must NOT shift to make room — that would disturb existing layouts.
+    const dummyIds = new Set(['__d']);
+    const orderedLayers = [['A'], ['X', '__d'], ['C']];
+    const segments = [
+      { from: 'A', to: '__d', parentEdgeIdx: 0 },
+      { from: '__d', to: 'C', parentEdgeIdx: 0 },
+    ];
+    const widths = new Map<string, number>([['A', 100], ['X', 100], ['C', 100]]);
+
+    const coords = assignCoordinates({
+      orderedLayers,
+      segments,
+      widthOf: (id) => widths.get(id) ?? 0,
+      dummyIds,
+      horizontalGap: 30,
+      dummyGap: 12,
+    });
+
+    // X (real) is at the leftmost position of its layer, untouched by relaxation.
+    // dummy is clamped to the right of X.
+    expect(coords.centerX.get('X')!).toBeLessThan(coords.centerX.get('__d')!);
   });
 });

@@ -674,17 +674,45 @@ function arrow(x1: number, y1: number, x2: number, y2: number): Shape[] {
 
 function labeledArrow(x1: number, y1: number, x2: number, y2: number, label: string): Shape[] {
   const shapes = arrow(x1, y1, x2, y2);
-  if (label) {
+  if (!label) return shapes;
+
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const mx = (x1 + x2) / 2;
+  const my = (y1 + y2) / 2;
+
+  // For near-vertical arrows (while-loop yes branch, straight down), keep the
+  // legacy horizontal offset to the right so the label sits beside the line.
+  // For diagonal arrows (if/else branches splaying from a diamond), shift the
+  // label perpendicular to the line, toward the upper side, so it doesn't sit
+  // on top of the stroke.
+  if (Math.abs(dx) < Math.abs(dy) * 0.3) {
     shapes.push({
       type: 'text',
-      x: (x1 + x2) / 2 + EDGE_LABEL_PAD,
-      y: (y1 + y2) / 2,
+      x: mx + EDGE_LABEL_PAD,
+      y: my,
       text: label,
       anchor: 'start',
       baseline: 'middle',
       font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
     });
+    return shapes;
   }
+
+  const len = Math.hypot(dx, dy) || 1;
+  let nx = -dy / len;
+  let ny = dx / len;
+  if (ny > 0) { nx = -nx; ny = -ny; }
+  const offset = FONT_LABEL;
+  shapes.push({
+    type: 'text',
+    x: mx + nx * offset,
+    y: my + ny * offset,
+    text: label,
+    anchor: nx > 0.3 ? 'start' : nx < -0.3 ? 'end' : 'middle',
+    baseline: 'middle',
+    font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
+  });
   return shapes;
 }
 

@@ -60,8 +60,26 @@ interface Graph {
 }
 
 export function layoutJson(ast: JsonAst): Scene {
+  return layoutKvTree({
+    title: ast.title,
+    data: ast.data,
+    highlights: ast.highlights,
+    parseError: ast.parseError,
+    errorLabel: 'JSON parse error',
+  });
+}
+
+export interface KvTreeInput {
+  title: string;
+  data: unknown;
+  highlights: string[][];
+  parseError: string;
+  errorLabel: string;
+}
+
+export function layoutKvTree(ast: KvTreeInput): Scene {
   if (ast.parseError) {
-    return errorScene(ast.parseError);
+    return errorScene(ast.parseError, ast.errorLabel);
   }
 
   const highlightSet = new Set(ast.highlights.map((p) => p.join('')));
@@ -314,7 +332,7 @@ function isComposite(v: unknown): v is unknown[] | Record<string, unknown> {
   return v !== null && typeof v === 'object';
 }
 
-function scalarOnly(ast: JsonAst): Scene {
+function scalarOnly(ast: KvTreeInput): Scene {
   const formatted = formatPrimitive(ast.data as Primitive);
   const m = measureText(formatted.text, VALUE_FONT);
   const w = m.width + ROW_PAD_X * 2 + PAGE_PAD * 2;
@@ -345,7 +363,7 @@ function scalarOnly(ast: JsonAst): Scene {
   };
 }
 
-function errorScene(message: string): Scene {
+function errorScene(message: string, label: string): Scene {
   return {
     width: 480,
     height: 80,
@@ -359,7 +377,7 @@ function errorScene(message: string): Scene {
       {
         type: 'text',
         x: 12, y: 24,
-        text: 'JSON parse error',
+        text: label,
         anchor: 'start', baseline: 'alphabetic',
         font: { family: FONT_FAMILY, size: 14, weight: 'bold', color: '#c33' },
       },

@@ -45,8 +45,10 @@ export {
   parseWbs,
   parseGantt,
   parseJson,
+  parseYaml,
   parseEbnf,
   parseRegex,
+  parseTiming,
 } from './parser/index.js';
 export { layout } from './layout/index.js';
 export { SvgRenderer } from './render/svg/index.js';
@@ -86,6 +88,7 @@ export type {
   UCNode,
   UCNodeKind,
   UCRelationship,
+  UCContainer,
   StateAst,
   StateNode,
   StateKind,
@@ -107,6 +110,11 @@ export type {
   GanttAst,
   WeekdayName,
   JsonAst,
+  YamlAst,
+  TimingAst,
+  TimingTrack,
+  TimingTrackKind,
+  TimingEvent,
   EbnfRule,
   EbnfAst,
   RegexAst,

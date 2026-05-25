@@ -48,6 +48,40 @@ describe('deployment parser', () => {
     const a = parseDeployment('@startuml\nnode "Prod Cluster" as PC\n@enduml');
     expect(a.nodes[0]).toMatchObject({ id: 'PC', name: 'Prod Cluster', nodeKind: 'node' });
   });
+
+  it('parses [X] shorthand nested inside container blocks', () => {
+    const a = parseDeployment([
+      '@startuml',
+      'node "Web Server" {',
+      '  component Apache',
+      '  artifact "config.yml" as Config',
+      '}',
+      'node "Database Server" {',
+      '  [PostgreSQL]',
+      '}',
+      'cloud "AWS" {',
+      '  [Lambda]',
+      '}',
+      'Apache --> PostgreSQL',
+      'Apache --> Config',
+      '@enduml',
+    ].join('\n'));
+    expect(a.nodes.map((n) => n.name)).toEqual(['Web Server', 'Database Server', 'AWS']);
+    const db = a.nodes.find((n) => n.name === 'Database Server')!;
+    expect(db.children.map((c) => c.id)).toEqual(['PostgreSQL']);
+    expect(db.children[0]).toMatchObject({ nodeKind: 'component' });
+    const aws = a.nodes.find((n) => n.name === 'AWS')!;
+    expect(aws.children.map((c) => c.id)).toEqual(['Lambda']);
+    expect(a.relationships.map((r) => `${r.source}->${r.target}`)).toEqual([
+      'Apache->PostgreSQL',
+      'Apache->Config',
+    ]);
+  });
+
+  it('normalizes [X] in relationship endpoints', () => {
+    const a = parseDeployment('@startuml\nnode N {\n  [A]\n}\n[A] --> [B]\n@enduml');
+    expect(a.relationships[0]).toMatchObject({ source: 'A', target: 'B' });
+  });
 });
 
 describe('object parser', () => {

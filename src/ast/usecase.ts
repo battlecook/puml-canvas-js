@@ -18,9 +18,16 @@ export interface UCRelationship {
   label: string;
 }
 
+export interface UCContainer {
+  id: string;
+  label: string;
+  childIds: string[];
+}
+
 export interface UseCaseAst {
   kind: 'usecase';
   title: string;
   nodes: UCNode[];
+  containers: UCContainer[];
   relationships: UCRelationship[];
 }

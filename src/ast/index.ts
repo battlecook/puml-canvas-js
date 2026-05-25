@@ -14,7 +14,8 @@ export type DiagramKind =
   | 'yaml'
   | 'wbs'
   | 'ebnf'
-  | 'regex';
+  | 'regex'
+  | 'timing';
 
 export interface UnknownAst {
   kind: 'unknown';
@@ -40,8 +41,10 @@ export type DiagramAst =
   | import('./tree.js').WbsAst
   | import('./gantt.js').GanttAst
   | import('./json.js').JsonAst
+  | import('./yaml.js').YamlAst
   | import('./grammar.js').EbnfAst
-  | import('./grammar.js').RegexAst;
+  | import('./grammar.js').RegexAst
+  | import('./timing.js').TimingAst;
 
 export type {
   ParticipantShape,
@@ -78,6 +81,7 @@ export type {
   UCNodeKind,
   UCNode,
   UCRelationship,
+  UCContainer,
   UseCaseAst,
 } from './usecase.js';
 
@@ -126,5 +130,14 @@ export type {
 } from './gantt.js';
 
 export type { JsonAst } from './json.js';
+
+export type { YamlAst } from './yaml.js';
+
+export type {
+  TimingTrackKind,
+  TimingTrack,
+  TimingEvent,
+  TimingAst,
+} from './timing.js';
 
 export type { EbnfRule, EbnfAst, RegexAst } from './grammar.js';
