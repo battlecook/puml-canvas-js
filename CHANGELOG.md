@@ -8,6 +8,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The project is pre-1.0. While the public API is stable across patch releases,
 > minor releases (0.X.0) may introduce breaking changes until 1.0.0.
 
+## [0.5.0] - 2026-05-26
+
+### Added
+
+- **Sequence note variants.** Sequence diagrams now parse and render
+  `hnote` and `rnote` alongside regular `note`, including inline and block
+  forms, `endhnote` / `endrnote` / spaced end forms, and optional `#color`
+  fills for side, over, and across notes.
+- **Sequence `note across`.** Added `note across`, `hnote across`, and
+  `rnote across` for diagram-wide notes that span the full page width.
+- **Sequence references.** Added `ref over A[, B, ...]` in inline and block
+  forms, rendering a tabbed `ref` box that spans the target lanes and supports
+  multi-line body text.
+- **Sequence long delays.** Added `... long delay ...` parsing/rendering as a
+  centered dashed delay annotation, distinct from boxed `== divider ==`
+  dividers.
+- **Extended sequence label markup.** Extracted shared sequence markup helpers
+  and expanded supported Creole/HTML-like styling to include monospace
+  (`""text""`), strikethrough (`--text--`, `<s>`, `<strike>`), underline
+  (`__text__`, `<u>`), waved underline (`~~text~~`), bold, italic, and font
+  colors. Participant headers now use the same markup measurement/rendering as
+  message labels and notes.
+- **Sequence `partition` groups.** Added `partition <label>` as a sequence
+  group kind, rendered with the existing tabbed group frame style.
+
+### Changed
+
+- **Sequence note and ref spacing.** Lane gaps and diagram bounds now expand
+  for side notes, single-lane refs, multi-lane refs, and across notes so wide
+  annotations do not clip or overlap neighbouring participants.
+- **Sequence AST note/ref surface.** Notes now carry a `shape`, flexible target
+  list, optional `color`, and `across` position; dividers now distinguish
+  boxed dividers from delay annotations; refs are represented as first-class
+  sequence statements.
+
+### Fixed
+
+- **Markup rendering consistency.** Participant labels, messages, notes, and
+  refs now share the same span renderer so styled text is measured and drawn
+  consistently across sequence diagram surfaces.
+- **Wide sequence annotations.** `note left of` on the first or inner lanes,
+  `note right of` on later lanes, and wide single-lane `ref over X` boxes now
+  grow the canvas/gaps instead of being clipped at the SVG edge.
+
+### Tests
+
+- Test suite grew from 356 → 375 cases. New coverage includes colored notes,
+  `hnote` / `rnote`, `note across`, `ref over`, long delays, partition groups,
+  extended Creole markup, participant-label markup, side-note spacing, and the
+  updated sequence notes golden snapshot.
+
 ## [0.4.0] - 2026-05-26
 
 ### Added

@@ -166,6 +166,250 @@ describe('sequence layout', () => {
     expect(italicResponse).toBeDefined();
   });
 
+  it('renders creole `--strike--`, `__underline__`, `~~waved~~` markers', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'participant A',
+        'participant B',
+        'A -> B : x',
+        'note left',
+        '  --stroke--',
+        '  __under__',
+        '  ~~wave~~',
+        'end note',
+        '@enduml',
+      ].join('\n'),
+    );
+    // Strike + underline render as straight lines; wave renders as a polyline
+    // zig-zag. Verify at least one of each (text color #000).
+    const lines = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { stroke?: string } }).style.stroke === '#000',
+    );
+    const polylines = scene.children.filter(
+      (s) =>
+        s.type === 'polyline' &&
+        (s as { style: { stroke?: string } }).style.stroke === '#000',
+    );
+    // At least 2 horizontal text lines (strike + underline)
+    expect(lines.length).toBeGreaterThanOrEqual(2);
+    // At least 1 wave polyline
+    expect(polylines.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders `... long delay ...` as a centered dashed annotation', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'participant A',
+        'participant B',
+        'A -> B',
+        '... long delay ...',
+        'A -> B',
+        '@enduml',
+      ].join('\n'),
+    );
+    const dashedLine = scene.children.find(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { strokeDasharray?: string } }).style.strokeDasharray === '2,3',
+    );
+    expect(dashedLine).toBeDefined();
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(texts).toContain('long delay');
+  });
+
+  it('renders markup in participant label (`The **Famous** Bob`)', () => {
+    const scene = compile(
+      '@startuml\nparticipant "The **Famous** Bob" as Bob\nBob -> Bob: x\n@enduml',
+    );
+    const famous = scene.children.find(
+      (s) =>
+        s.type === 'text' &&
+        (s as { text: string }).text === 'Famous' &&
+        (s as { font?: { weight?: string } }).font?.weight === 'bold',
+    );
+    expect(famous).toBeDefined();
+  });
+
+  it('grows the diagram so `note left of <inner lane>` is not clipped', () => {
+    const wide = compile(
+      [
+        '@startuml',
+        'participant Alice',
+        'participant Bob',
+        'Alice -> Bob',
+        'note left of Bob',
+        '  Some long left note that needs space',
+        'end note',
+        '@enduml',
+      ].join('\n'),
+    );
+    const narrow = compile('@startuml\nparticipant Alice\nparticipant Bob\nAlice -> Bob\n@enduml');
+    // Wide case must be substantially wider because the note pushes the lanes apart.
+    expect(wide.width).toBeGreaterThan(narrow.width + 100);
+  });
+
+  it('renders `ref over A, B : text` as a tabbed reference box spanning the lanes', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'participant Alice',
+        'actor Bob',
+        'ref over Alice, Bob : init',
+        '@enduml',
+      ].join('\n'),
+    );
+    // The bold "ref" tab text and the body text both exist.
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => ({
+        text: (s as { text: string }).text,
+        weight: (s as { font?: { weight?: string } }).font?.weight,
+      }));
+    const refTab = texts.find((t) => t.text === 'ref' && t.weight === 'bold');
+    expect(refTab).toBeDefined();
+    expect(texts.some((t) => t.text === 'init')).toBe(true);
+    // The body rect uses the heavier 1.5 stroke that distinguishes refs from notes.
+    const refRect = scene.children.find(
+      (s) =>
+        s.type === 'rect' &&
+        (s as { style: { strokeWidth?: number; stroke?: string } }).style.strokeWidth === 1.5,
+    );
+    expect(refRect).toBeDefined();
+  });
+
+  it('renders multi-line `ref over X ... end ref` with each text line', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'actor Bob',
+        'ref over Bob',
+        '  This can be on',
+        '  several lines',
+        'end ref',
+        '@enduml',
+      ].join('\n'),
+    );
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(texts).toContain('This can be on');
+    expect(texts).toContain('several lines');
+  });
+
+  it('renders `partition <label>` as a tabbed group box', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'partition p1',
+        'A -> B',
+        'end',
+        '@enduml',
+      ].join('\n'),
+    );
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(texts).toContain('partition [p1]');
+  });
+
+  it('renders `note across` spanning the full diagram width', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'A -> B',
+        'B -> C',
+        'note across: spans everything',
+        '@enduml',
+      ].join('\n'),
+    );
+    const acrossNote = scene.children.find(
+      (s) =>
+        s.type === 'polygon' &&
+        (s as { style: { fill?: string } }).style.fill === '#fbfb77' &&
+        (s as { points: [number, number][] }).points.length === 5,
+    ) as { points: [number, number][] };
+    expect(acrossNote).toBeDefined();
+    const leftX = acrossNote.points[0]![0];
+    const rightX = acrossNote.points[2]![0];
+    // Note width must be close to full diagram width (small SIDE_BLEED off both edges).
+    expect(rightX - leftX).toBeGreaterThan(scene.width * 0.85);
+  });
+
+  it('treats `""text""` as monospace creole markup', () => {
+    const scene = compile(
+      '@startuml\nA -> B : plain ""code"" more\n@enduml',
+    );
+    const monoText = scene.children.find(
+      (s) =>
+        s.type === 'text' &&
+        (s as { font?: { family?: string } }).font?.family === 'monospace' &&
+        (s as { text: string }).text === 'code',
+    );
+    expect(monoText).toBeDefined();
+  });
+
+  it('renders hnote as hexagon (6-point polygon) and rnote as plain rect', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'A -> A',
+        'hnote over A : hex',
+        'rnote over A : rect',
+        '@enduml',
+      ].join('\n'),
+    );
+    const noteFill = '#fbfb77';
+    const hexagons = scene.children.filter(
+      (s) =>
+        s.type === 'polygon' &&
+        (s as { style: { fill?: string } }).style.fill === noteFill &&
+        (s as { points: [number, number][] }).points.length === 6,
+    );
+    const plainRects = scene.children.filter(
+      (s) =>
+        s.type === 'rect' &&
+        (s as { style: { fill?: string } }).style.fill === noteFill,
+    );
+    expect(hexagons.length).toBe(1);
+    expect(plainRects.length).toBe(1);
+  });
+
+  it('renders note `#color` as fill and grows diagram for side notes', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'participant Alice',
+        'participant Bob',
+        'note left of Alice #aqua',
+        'left aqua',
+        'end note',
+        'note over Alice, Bob #FFAAAA: pink over both',
+        '@enduml',
+      ].join('\n'),
+    );
+    const aquaPolygon = scene.children.find(
+      (s) =>
+        s.type === 'polygon' &&
+        (s as { style: { fill?: string } }).style.fill === 'aqua',
+    );
+    const pinkPolygon = scene.children.find(
+      (s) =>
+        s.type === 'polygon' &&
+        (s as { style: { fill?: string } }).style.fill === '#FFAAAA',
+    );
+    expect(aquaPolygon).toBeDefined();
+    expect(pinkPolygon).toBeDefined();
+    // Diagram width should be wider than the default narrow case (Alice+Bob ~200)
+    // to fit the left note on lane 0.
+    expect(scene.width).toBeGreaterThan(200);
+  });
+
   it('renders `newpage` as separate page sections (own headers + lifelines)', () => {
     const scene = compile(
       [

@@ -3,12 +3,14 @@ import type {
   DividerStmt,
   GroupKind,
   NoteStmt,
+  RefStmt,
   SequenceAst,
   SequenceStatement,
 } from '../../ast/sequence.js';
 import type { Scene, Shape } from '../../scene/types.js';
 import { measureText } from './measure.js';
 import { drawHeader, maxHeaderHeight, participantContentWidth } from './headers.js';
+import { parseLabelMarkup, drawLabelSpans } from './markup.js';
 
 const TOP_PAD = 12;
 const BOTTOM_PAD = 12;
@@ -39,6 +41,11 @@ const PAGE_HEADER_GAP = 8;
 const COLOR_PAGE_MARGIN = '#999';
 const DIVIDER_HEIGHT = 22;
 const DIVIDER_GAP = 8;
+const REF_PAD_X = 12;
+const REF_PAD_Y = 8;
+const REF_TAB_FOLD = 6;
+const REF_TAB_H = 18;
+const REF_GAP = 14;
 
 const FONT_FAMILY = 'sans-serif';
 const FONT_SIZE = 12;
@@ -119,6 +126,47 @@ export function layoutSequence(ast: SequenceAst): Scene {
     const required = needLeftOfCenter - headerW[0]! / 2;
     if (required > leftExtra) leftExtra = required;
   }
+  // `note left of X` on lane 0 sits to the left of the lifeline; widen the
+  // left margin so the note doesn't get clipped at the SVG edge. drawNote
+  // computes the note's x as `laneCenter[0] - headerW[0]/2 - noteW - SIDE_OFFSET`
+  // and laneCenter[0] = SIDE_PAD + leftExtra + headerW[0]/2, so we need
+  // leftExtra ≥ noteW + SIDE_OFFSET for the note to stay within the SVG.
+  for (const stmt of ast.statements) {
+    if (stmt.type !== 'note' || stmt.position !== 'left') continue;
+    const idx = laneIdx.get(stmt.targets[0]);
+    if (idx !== 0) continue;
+    const lines = stmt.text ? stmt.text.split('\n') : [];
+    let maxLineW = 0;
+    for (const line of lines) {
+      const w = measureText(line, FONT_SIZE).width;
+      if (w > maxLineW) maxLineW = w;
+    }
+    const noteW = maxLineW + NOTE_PAD_X * 2;
+    const required = noteW + NOTE_SIDE_OFFSET;
+    if (required > leftExtra) leftExtra = required;
+  }
+  // Single-lane `ref over X` on lane 0 may bleed leftward when the body is
+  // wider than the header. Grow leftExtra accordingly.
+  for (const stmt of ast.statements) {
+    if (stmt.type !== 'ref') continue;
+    const idxs = stmt.targets
+      .map((t) => laneIdx.get(t))
+      .filter((v): v is number => v !== undefined);
+    if (idxs.length === 0) continue;
+    const lo = Math.min(...idxs);
+    const hi = Math.max(...idxs);
+    if (lo !== 0 || hi !== 0) continue;
+    const lines = stmt.text ? stmt.text.split('\n') : [];
+    let maxLineW = 0;
+    for (const line of lines) {
+      const w = measureText(line, FONT_SIZE).width;
+      if (w > maxLineW) maxLineW = w;
+    }
+    const tabBlockW = measureText('ref', FONT_SIZE).width + 16 + REF_TAB_FOLD + 8;
+    const refW = Math.max(maxLineW + REF_PAD_X * 2, tabBlockW);
+    const halfOverflow = (refW - headerW[0]!) / 2;
+    if (halfOverflow > leftExtra) leftExtra = halfOverflow;
+  }
 
   const laneCenters: number[] = [];
   let cursorX = SIDE_PAD + leftExtra;
@@ -147,6 +195,63 @@ export function layoutSequence(ast: SequenceAst): Scene {
     }
     const rightEdge = laneCenters[idx]! + Math.max(6 + maxLineW, SELF_MSG_W) + SIDE_PAD;
     if (rightEdge > diagramWidth) diagramWidth = rightEdge;
+  }
+  // `note right of X` extends to the right of the lifeline. Grow width.
+  for (const stmt of ast.statements) {
+    if (stmt.type !== 'note' || stmt.position !== 'right') continue;
+    const idx = laneIdx.get(stmt.targets[0]!);
+    if (idx === undefined) continue;
+    const lines = stmt.text ? stmt.text.split('\n') : [];
+    let maxLineW = 0;
+    for (const line of lines) {
+      const w = measureText(line, FONT_SIZE).width;
+      if (w > maxLineW) maxLineW = w;
+    }
+    const noteW = maxLineW + NOTE_PAD_X * 2;
+    const rightEdge =
+      laneCenters[idx]! + headerW[idx]! / 2 + NOTE_SIDE_OFFSET + noteW + SIDE_PAD;
+    if (rightEdge > diagramWidth) diagramWidth = rightEdge;
+  }
+  // Single-lane `ref over X` — if the body is wider than X's header, the
+  // ref bleeds equally to both sides. Grow the right edge of the diagram
+  // for the overflow on the right side. (The left-side overflow on lane 0
+  // is handled before laneCenters are computed, via leftExtra.)
+  for (const stmt of ast.statements) {
+    if (stmt.type !== 'ref') continue;
+    const idxs = stmt.targets
+      .map((t) => laneIdx.get(t))
+      .filter((v): v is number => v !== undefined);
+    if (idxs.length === 0) continue;
+    const lo = Math.min(...idxs);
+    const hi = Math.max(...idxs);
+    if (lo !== hi) continue;
+    if (hi !== parts.length - 1) continue; // only matters on the rightmost lane
+    const lines = stmt.text ? stmt.text.split('\n') : [];
+    let maxLineW = 0;
+    for (const line of lines) {
+      const w = measureText(line, FONT_SIZE).width;
+      if (w > maxLineW) maxLineW = w;
+    }
+    const tabBlockW = measureText('ref', FONT_SIZE).width + 16 + REF_TAB_FOLD + 8;
+    const refW = Math.max(maxLineW + REF_PAD_X * 2, tabBlockW);
+    const halfOverflow = (refW - headerW[hi]!) / 2;
+    if (halfOverflow > 0) {
+      const rightEdge = laneCenters[hi]! + headerW[hi]! / 2 + halfOverflow + SIDE_PAD;
+      if (rightEdge > diagramWidth) diagramWidth = rightEdge;
+    }
+  }
+
+  // `note across` spans the full diagram. Grow width to fit the text.
+  for (const stmt of ast.statements) {
+    if (stmt.type !== 'note' || stmt.position !== 'across') continue;
+    const lines = stmt.text ? stmt.text.split('\n') : [];
+    let maxLineW = 0;
+    for (const line of lines) {
+      const w = measureText(line, FONT_SIZE).width;
+      if (w > maxLineW) maxLineW = w;
+    }
+    const need = maxLineW + NOTE_PAD_X * 2 + SIDE_PAD * 2;
+    if (need > diagramWidth) diagramWidth = need;
   }
 
   const pageHeaderLines = ast.header ? ast.header.split('\n') : [];
@@ -302,6 +407,22 @@ export function layoutSequence(ast: SequenceAst): Scene {
         y += DIVIDER_HEIGHT + DIVIDER_GAP;
         break;
 
+      case 'ref': {
+        const idxs = stmt.targets
+          .map((t) => laneIdx.get(t))
+          .filter((v): v is number => v !== undefined);
+        if (idxs.length > 0) {
+          touch(Math.min(...idxs), Math.max(...idxs));
+        }
+        const drawn = drawRef(
+          stmt, y, laneCenters, headerW, laneIdx,
+          labels[i] ?? stmt.text,
+        );
+        body.push(...drawn.shapes);
+        y += drawn.height + REF_GAP;
+        break;
+      }
+
       case 'note': {
         const idx1 = laneIdx.get(stmt.targets[0]);
         if (idx1 !== undefined) {
@@ -312,7 +433,10 @@ export function layoutSequence(ast: SequenceAst): Scene {
             touch(idx1);
           }
         }
-        const drawn = drawNote(stmt, y, laneCenters, headerW, laneIdx, labels[i] ?? stmt.text);
+        const drawn = drawNote(
+          stmt, y, laneCenters, headerW, laneIdx,
+          labels[i] ?? stmt.text, diagramWidth,
+        );
         body.push(...drawn.shapes);
         y += drawn.height + NOTE_GAP;
         break;
@@ -524,6 +648,11 @@ function precomputeMessageLabels(stmts: SequenceStatement[]): string[] {
         resolveUnicodeEscapes(substituteAutoNumber(line.replace(/^\s+/, ''), lastAutoStr)),
       );
       out[i] = lines.join('\n');
+    } else if (s.type === 'ref') {
+      const lines = s.text.split('\n').map((line) =>
+        resolveUnicodeEscapes(line.replace(/^\s+/, '')),
+      );
+      out[i] = lines.join('\n');
     } else {
       out[i] = '';
     }
@@ -604,6 +733,64 @@ function computeLaneGaps(
     const need = measureText(text, FONT_SIZE).width + MSG_TEXT_HPAD * 2;
     const lo = Math.min(fromIdx, toIdx);
     const hi = Math.max(fromIdx, toIdx);
+    let cur = (headerW[lo]! + headerW[hi]!) / 2;
+    for (let k = lo + 1; k < hi; k++) cur += headerW[k]!;
+    for (let k = lo; k < hi; k++) cur += gaps[k]!;
+    if (cur < need) {
+      const perGap = (need - cur) / (hi - lo);
+      for (let k = lo; k < hi; k++) gaps[k]! += perGap;
+    }
+  }
+
+  // `note left of X` where X is an inner lane (X > 0) needs the gap to the
+  // LEFT of X to fit the note's width. `note right of X` for an inner lane
+  // (X < laneCount-1) needs the gap to the RIGHT of X to fit. Without this,
+  // long side notes overflow into neighbouring participants' area.
+  for (const s of stmts) {
+    if (s.type !== 'note') continue;
+    if (s.position !== 'left' && s.position !== 'right') continue;
+    const idx = laneIdx.get(s.targets[0]!);
+    if (idx === undefined) continue;
+    const lines = s.text ? s.text.split('\n') : [];
+    let maxLineW = 0;
+    for (const line of lines) {
+      const w = measureText(line, FONT_SIZE).width;
+      if (w > maxLineW) maxLineW = w;
+    }
+    const noteW = maxLineW + NOTE_PAD_X * 2;
+    const need = noteW + NOTE_SIDE_OFFSET + headerW[idx]! / 2;
+    if (s.position === 'left' && idx > 0) {
+      // Gap between idx-1 and idx must accommodate the note plus the right
+      // half of lane idx-1's header.
+      const gapNeed = noteW + NOTE_SIDE_OFFSET + headerW[idx - 1]! / 2;
+      if (gaps[idx - 1]! < gapNeed) gaps[idx - 1] = gapNeed;
+    } else if (s.position === 'right' && idx < laneCount - 1) {
+      const gapNeed = noteW + NOTE_SIDE_OFFSET + headerW[idx + 1]! / 2;
+      if (gaps[idx]! < gapNeed) gaps[idx] = gapNeed;
+    }
+    void need;
+  }
+
+  // `ref over A[, B, ...]` — when the box spans multiple lanes, its content
+  // (text + tab) must fit between the leftmost and rightmost lane centers.
+  // For a single-lane ref, the body sits within that lane's header span, so
+  // no gap growth is needed.
+  for (const s of stmts) {
+    if (s.type !== 'ref') continue;
+    const idxs = s.targets
+      .map((t) => laneIdx.get(t))
+      .filter((v): v is number => v !== undefined);
+    if (idxs.length < 2) continue;
+    const lo = Math.min(...idxs);
+    const hi = Math.max(...idxs);
+    const lines = s.text ? s.text.split('\n') : [];
+    let maxLineW = 0;
+    for (const line of lines) {
+      const w = measureText(line, FONT_SIZE).width;
+      if (w > maxLineW) maxLineW = w;
+    }
+    const tabBlockW = measureText('ref', FONT_SIZE).width + 16 + REF_TAB_FOLD + 8;
+    const need = Math.max(maxLineW + REF_PAD_X * 2, tabBlockW);
     let cur = (headerW[lo]! + headerW[hi]!) / 2;
     for (let k = lo + 1; k < hi; k++) cur += headerW[k]!;
     for (let k = lo; k < hi; k++) cur += gaps[k]!;
@@ -794,6 +981,7 @@ function drawNote(
   headerW: number[],
   laneIdx: Map<string, number>,
   text: string,
+  diagramWidth: number,
 ): { shapes: Shape[]; height: number } {
   const lines = text.split('\n');
   const allSpans = lines.map(parseLabelMarkup);
@@ -804,15 +992,24 @@ function drawNote(
     if (lineW > maxLineW) maxLineW = lineW;
   }
   const lineH = FONT_SIZE * 1.25;
-  const textW = maxLineW + NOTE_PAD_X * 2;
+  // Hexagon ends pinch inward by `inset`; widen the box so text isn't clipped.
+  const shapePad = stmt.shape === 'hnote' ? 16 : 0;
+  const textW = maxLineW + NOTE_PAD_X * 2 + shapePad;
   const noteH = lines.length * lineH + NOTE_PAD_Y * 2;
 
   let x: number;
   let noteW = textW;
-  const idx1 = laneIdx.get(stmt.targets[0]) ?? 0;
-  if (stmt.position === 'over') {
+  const idx1 = stmt.targets[0] !== undefined
+    ? laneIdx.get(stmt.targets[0]) ?? 0
+    : 0;
+  if (stmt.position === 'across') {
+    // Spans the full diagram — from SIDE_PAD to diagramWidth - SIDE_PAD.
+    const SIDE_BLEED = 4;
+    x = SIDE_PAD - SIDE_BLEED;
+    noteW = Math.max(textW, diagramWidth - 2 * (SIDE_PAD - SIDE_BLEED));
+  } else if (stmt.position === 'over') {
     if (stmt.targets.length === 2) {
-      const idx2 = laneIdx.get(stmt.targets[1]) ?? idx1;
+      const idx2 = laneIdx.get(stmt.targets[1]!) ?? idx1;
       const left = Math.min(idx1, idx2);
       const right = Math.max(idx1, idx2);
       const spanLeft = laneCenters[left]! - headerW[left]! / 2;
@@ -829,8 +1026,33 @@ function drawNote(
     x = laneCenters[idx1]! + headerW[idx1]! / 2 + NOTE_SIDE_OFFSET;
   }
 
-  const shapes: Shape[] = [
-    {
+  const fill = stmt.color ?? COLOR_NOTE_FILL;
+  const noteStyle = { fill, stroke: COLOR_NOTE_STROKE, strokeWidth: 1 };
+  const foldStyle = { stroke: COLOR_NOTE_STROKE, strokeWidth: 1, fill: 'none' };
+  const shape = stmt.shape ?? 'note';
+  const shapes: Shape[] = [];
+
+  if (shape === 'rnote') {
+    shapes.push({
+      type: 'rect', x, y, w: noteW, h: noteH, style: noteStyle,
+    });
+  } else if (shape === 'hnote') {
+    const inset = 10;
+    shapes.push({
+      type: 'polygon',
+      points: [
+        [x + inset, y],
+        [x + noteW - inset, y],
+        [x + noteW, y + noteH / 2],
+        [x + noteW - inset, y + noteH],
+        [x + inset, y + noteH],
+        [x, y + noteH / 2],
+      ],
+      style: noteStyle,
+    });
+  } else {
+    // Default folded rectangle.
+    shapes.push({
       type: 'polygon',
       points: [
         [x, y],
@@ -839,26 +1061,137 @@ function drawNote(
         [x + noteW, y + noteH],
         [x, y + noteH],
       ],
-      style: { fill: COLOR_NOTE_FILL, stroke: COLOR_NOTE_STROKE, strokeWidth: 1 },
-    },
-    {
+      style: noteStyle,
+    });
+    shapes.push({
       type: 'polyline',
       points: [
         [x + noteW - NOTE_FOLD, y],
         [x + noteW - NOTE_FOLD, y + NOTE_FOLD],
         [x + noteW, y + NOTE_FOLD],
       ],
-      style: { stroke: COLOR_NOTE_STROKE, strokeWidth: 1, fill: 'none' },
-    },
-  ];
+      style: foldStyle,
+    });
+  }
 
+  // For hnote, push the text inward to clear the pinched ends.
+  const textXOffset = shape === 'hnote' ? NOTE_PAD_X + 4 : NOTE_PAD_X;
   for (let i = 0; i < lines.length; i++) {
     const spans = allSpans[i]!;
     const baseY = y + NOTE_PAD_Y + FONT_SIZE * 0.9 + i * lineH;
-    shapes.push(...drawLabelSpans(spans, x + NOTE_PAD_X, baseY, 'start', 'alphabetic'));
+    shapes.push(...drawLabelSpans(spans, x + textXOffset, baseY, 'start', 'alphabetic'));
   }
 
   return { shapes, height: noteH };
+}
+
+/**
+ * `ref over A[, B, ...]` — a folded-corner rectangle spanning the listed
+ * lanes (from leftmost lane center − headerW/2 to rightmost lane center +
+ * headerW/2, plus a small bleed) with a "ref" tab at the top-left.
+ *
+ * Returns `{ shapes, height }` so the caller can advance the y-cursor.
+ */
+function drawRef(
+  stmt: RefStmt,
+  y: number,
+  laneCenters: number[],
+  headerW: number[],
+  laneIdx: Map<string, number>,
+  text: string,
+): { shapes: Shape[]; height: number } {
+  const idxs = stmt.targets
+    .map((t) => laneIdx.get(t))
+    .filter((i): i is number => i !== undefined);
+  if (idxs.length === 0) return { shapes: [], height: 0 };
+  const lo = Math.min(...idxs);
+  const hi = Math.max(...idxs);
+  const xLeft = laneCenters[lo]! - headerW[lo]! / 2;
+  const xRight = laneCenters[hi]! + headerW[hi]! / 2;
+
+  const lines = text ? text.split('\n') : [];
+  const allSpans = lines.map(parseLabelMarkup);
+  let maxLineW = 0;
+  for (const spans of allSpans) {
+    let w = 0;
+    for (const sp of spans) w += measureText(sp.text, FONT_SIZE).width;
+    if (w > maxLineW) maxLineW = w;
+  }
+  const lineH = FONT_SIZE * 1.25;
+  const textBlockH = lines.length > 0 ? lines.length * lineH : 0;
+
+  // "ref" tab — bold, with a small fold notch at its bottom-right.
+  const tabLabel = 'ref';
+  const tabTextW = measureText(tabLabel, FONT_SIZE).width;
+  const tabW = tabTextW + 16;
+
+  const bodyH = textBlockH > 0 ? textBlockH + REF_PAD_Y * 2 : REF_PAD_Y * 2;
+  const minBodyW = tabW + REF_TAB_FOLD + 8;
+  const textBoxW = maxLineW + REF_PAD_X * 2;
+  const naturalW = xRight - xLeft;
+  const w = Math.max(naturalW, minBodyW, textBoxW);
+  // Center the box if it had to grow beyond the natural lane span.
+  const xBoxLeft = (xLeft + xRight) / 2 - w / 2;
+  const totalH = REF_TAB_H + bodyH;
+
+  const refBoxStyle = { fill: '#fff', stroke: '#000', strokeWidth: 1.5 };
+  const tabFillStyle = { fill: '#eeeeee', stroke: '#000', strokeWidth: 1.5 };
+  const foldLineStyle = { fill: 'none', stroke: '#000', strokeWidth: 1.5 };
+
+  const shapes: Shape[] = [];
+
+  // Body rectangle — sits below the tab, full width of the ref.
+  shapes.push({
+    type: 'rect',
+    x: xBoxLeft,
+    y: y + REF_TAB_H,
+    w,
+    h: bodyH,
+    style: refBoxStyle,
+  });
+
+  // The "ref" tab — a folder-style polygon with a notched bottom-right.
+  shapes.push({
+    type: 'polygon',
+    points: [
+      [xBoxLeft, y],
+      [xBoxLeft + tabW, y],
+      [xBoxLeft + tabW + REF_TAB_FOLD, y + REF_TAB_FOLD],
+      [xBoxLeft + tabW + REF_TAB_FOLD, y + REF_TAB_H],
+      [xBoxLeft, y + REF_TAB_H],
+    ],
+    style: tabFillStyle,
+  });
+  // Fold edge — the diagonal line that closes the notch.
+  shapes.push({
+    type: 'polyline',
+    points: [
+      [xBoxLeft + tabW, y],
+      [xBoxLeft + tabW, y + REF_TAB_FOLD],
+      [xBoxLeft + tabW + REF_TAB_FOLD, y + REF_TAB_FOLD],
+    ],
+    style: foldLineStyle,
+  });
+  shapes.push({
+    type: 'text',
+    x: xBoxLeft + tabW / 2,
+    y: y + REF_TAB_H / 2,
+    text: tabLabel,
+    anchor: 'middle',
+    baseline: 'middle',
+    font: { family: FONT_FAMILY, size: FONT_SIZE, color: '#000', weight: 'bold' },
+  });
+
+  // Body text — centered horizontally in the box, one line per row.
+  for (let i = 0; i < allSpans.length; i++) {
+    const spans = allSpans[i]!;
+    const baseY = y + REF_TAB_H + REF_PAD_Y + FONT_SIZE * 0.9 + i * lineH;
+    shapes.push(
+      ...drawLabelSpans(spans, xBoxLeft + w / 2, baseY, 'middle', 'alphabetic'),
+    );
+  }
+
+  return { shapes, height: totalH };
 }
 
 function drawGroup(
@@ -932,8 +1265,38 @@ function drawGroup(
 }
 
 function drawDivider(stmt: DividerStmt, y: number, totalWidth: number): Shape[] {
-  const labelW = measureText(stmt.label, FONT_SIZE).width + 24;
   const cx = totalWidth / 2;
+  if (stmt.kind === 'delay') {
+    // `... long delay ...` — centered italic text with a dotted line through it,
+    // no boxed pill.
+    const spans = parseLabelMarkup(stmt.label);
+    const lineY = y + DIVIDER_HEIGHT / 2;
+    const shapes: Shape[] = [
+      {
+        type: 'line',
+        x1: SIDE_PAD, y1: lineY,
+        x2: totalWidth - SIDE_PAD, y2: lineY,
+        style: {
+          stroke: COLOR_GROUP_STROKE, strokeWidth: 1, strokeDasharray: '2,3',
+        },
+      },
+    ];
+    if (stmt.label) {
+      // Erase the dashed line under the label with a small white rect.
+      const lblW = measureText(stmt.label, FONT_SIZE).width + 12;
+      shapes.push({
+        type: 'rect',
+        x: cx - lblW / 2, y: lineY - FONT_SIZE / 2 - 2,
+        w: lblW, h: FONT_SIZE + 4,
+        style: { fill: '#fff', stroke: 'none', strokeWidth: 0 },
+      });
+      shapes.push(
+        ...drawLabelSpans(spans, cx, lineY, 'middle', 'middle', FONT_SIZE),
+      );
+    }
+    return shapes;
+  }
+  const labelW = measureText(stmt.label, FONT_SIZE).width + 24;
   return [
     {
       type: 'line',
@@ -961,136 +1324,4 @@ function drawDivider(stmt: DividerStmt, y: number, totalWidth: number): Shape[] 
       font: { family: FONT_FAMILY, size: FONT_SIZE, color: '#000', weight: 'bold' },
     },
   ];
-}
-
-interface LabelSpan {
-  text: string;
-  bold: boolean;
-  italic: boolean;
-  underline: boolean;
-  color: string | undefined;
-}
-
-/**
- * Mini HTML-like markup parser for sequence labels.
- *
- * Recognised tags:
- *   `<b>...</b>`                  — bold
- *   `<u>...</u>`                  — underline
- *   `<font color=X>...</font>`    — colored text (X may be quoted or bare)
- *
- * Tags can be left unclosed (PlantUML convention): an open `<b>` carries to
- * the end of the line. Unknown tags are silently dropped. Returns a flat
- * sequence of styled spans.
- */
-function parseLabelMarkup(s: string): LabelSpan[] {
-  const out: LabelSpan[] = [];
-  let bold = false;
-  let italic = false;
-  let underline = false;
-  let color: string | undefined;
-  let buf = '';
-  const flush = (): void => {
-    if (buf.length > 0) {
-      out.push({ text: buf, bold, italic, underline, color });
-      buf = '';
-    }
-  };
-  let i = 0;
-  while (i < s.length) {
-    // Creole toggles: `**` for bold, `//` for italic.
-    if (s.startsWith('**', i)) { flush(); bold = !bold; i += 2; continue; }
-    if (s.startsWith('//', i)) { flush(); italic = !italic; i += 2; continue; }
-    if (s[i] === '<') {
-      const m = /^<\s*(\/?)([A-Za-z]+)((?:\s+[^>]*)?)>/.exec(s.slice(i));
-      if (m) {
-        flush();
-        const closing = m[1] === '/';
-        const tag = m[2]!.toLowerCase();
-        const attrs = m[3] ?? '';
-        if (tag === 'b') bold = !closing;
-        else if (tag === 'i') italic = !closing;
-        else if (tag === 'u') underline = !closing;
-        else if (tag === 'font') {
-          if (closing) {
-            color = undefined;
-          } else {
-            const cm = /color\s*=\s*"?([^"\s>]+)"?/i.exec(attrs);
-            if (cm) color = cm[1];
-          }
-        }
-        i += m[0].length;
-        continue;
-      }
-    }
-    buf += s[i];
-    i++;
-  }
-  flush();
-  return out;
-}
-
-function drawLabelSpans(
-  spans: LabelSpan[],
-  x: number,
-  y: number,
-  anchor: 'start' | 'middle' | 'end',
-  baseline: 'alphabetic' | 'middle' = 'alphabetic',
-): Shape[] {
-  if (spans.length === 0) return [];
-  // Fast path: a plain unstyled label keeps the legacy single-text rendering
-  // so plain-message goldens stay byte-identical.
-  if (
-    spans.length === 1 &&
-    !spans[0]!.bold &&
-    !spans[0]!.italic &&
-    !spans[0]!.underline &&
-    !spans[0]!.color
-  ) {
-    return [{
-      type: 'text',
-      x, y,
-      text: spans[0]!.text,
-      anchor,
-      baseline,
-      font: { family: FONT_FAMILY, size: FONT_SIZE, color: '#000' },
-    }];
-  }
-  const widths = spans.map((sp) => measureText(sp.text, FONT_SIZE).width);
-  const totalW = widths.reduce((a, b) => a + b, 0);
-  let cursor = x;
-  if (anchor === 'middle') cursor = x - totalW / 2;
-  else if (anchor === 'end') cursor = x - totalW;
-  const out: Shape[] = [];
-  for (let i = 0; i < spans.length; i++) {
-    const sp = spans[i]!;
-    const w = widths[i]!;
-    if (sp.text.length > 0) {
-      out.push({
-        type: 'text',
-        x: cursor,
-        y,
-        text: sp.text,
-        anchor: 'start',
-        baseline,
-        font: {
-          family: FONT_FAMILY,
-          size: FONT_SIZE,
-          weight: sp.bold ? 'bold' : 'normal',
-          style: sp.italic ? 'italic' : 'normal',
-          color: sp.color ?? '#000',
-        },
-      });
-      if (sp.underline) {
-        const underlineY = baseline === 'middle' ? y + FONT_SIZE / 2 : y + 2;
-        out.push({
-          type: 'line',
-          x1: cursor, y1: underlineY, x2: cursor + w, y2: underlineY,
-          style: { stroke: sp.color ?? '#000', strokeWidth: 1 },
-        });
-      }
-    }
-    cursor += w;
-  }
-  return out;
 }

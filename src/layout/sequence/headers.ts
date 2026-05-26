@@ -1,6 +1,7 @@
 import type { Participant, ParticipantSection } from '../../ast/sequence.js';
 import type { Shape } from '../../scene/types.js';
 import { measureText } from './measure.js';
+import { parseLabelMarkup, drawLabelSpans, measureSpansWidth } from './markup.js';
 
 export const HEADER_HEIGHT_BASE = 50;
 const FONT_FAMILY = 'sans-serif';
@@ -32,7 +33,14 @@ function sectionsHeight(sections: ParticipantSection[]): number {
 
 export function participantContentWidth(p: Participant): number {
   if (!p.sections || p.sections.length === 0) {
-    return measureText(p.label, FONT_SIZE).width;
+    // Width respects markup splits — each span measured individually.
+    const lines = p.label.split('\n');
+    let w = 0;
+    for (const line of lines) {
+      const sw = measureSpansWidth(parseLabelMarkup(line), FONT_SIZE);
+      if (sw > w) w = sw;
+    }
+    return w;
   }
   let w = 0;
   for (const sec of p.sections) {
@@ -93,32 +101,26 @@ function labelLines(label: string): string[] {
 
 function labelBelow(label: string, cx: number, y: number, headerHeight: number): Shape[] {
   const lines = labelLines(label);
-  const total = lines.length * LINE_HEIGHT;
   const baseY = y + headerHeight - 5;
-  return lines.map((line, i) => ({
-    type: 'text',
-    x: cx,
-    y: baseY - (lines.length - 1 - i) * LINE_HEIGHT,
-    text: line,
-    anchor: 'middle',
-    baseline: 'alphabetic',
-    font: { family: FONT_FAMILY, size: FONT_SIZE, color: '#000' },
-  } as Shape)).slice(-Math.ceil(total / LINE_HEIGHT));
+  const out: Shape[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const spans = parseLabelMarkup(lines[i]!);
+    const lineY = baseY - (lines.length - 1 - i) * LINE_HEIGHT;
+    out.push(...drawLabelSpans(spans, cx, lineY, 'middle', 'alphabetic', FONT_SIZE));
+  }
+  return out;
 }
 
 function labelCenter(label: string, cx: number, y: number, headerHeight: number, yOffset = 0): Shape[] {
   const lines = labelLines(label);
   const cy = y + headerHeight / 2 + yOffset;
   const startY = cy - ((lines.length - 1) * LINE_HEIGHT) / 2;
-  return lines.map((line, i) => ({
-    type: 'text',
-    x: cx,
-    y: startY + i * LINE_HEIGHT,
-    text: line,
-    anchor: 'middle',
-    baseline: 'middle',
-    font: { family: FONT_FAMILY, size: FONT_SIZE, color: '#000' },
-  } as Shape));
+  const out: Shape[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const spans = parseLabelMarkup(lines[i]!);
+    out.push(...drawLabelSpans(spans, cx, startY + i * LINE_HEIGHT, 'middle', 'middle', FONT_SIZE));
+  }
+  return out;
 }
 
 function drawSectioned(

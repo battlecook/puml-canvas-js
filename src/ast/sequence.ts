@@ -64,13 +64,30 @@ export interface MessageStmt {
   color?: string;
 }
 
-export type NotePosition = 'left' | 'right' | 'over';
+export type NotePosition = 'left' | 'right' | 'over' | 'across';
+
+/**
+ * Note shape variants:
+ *   - `note`  (default) : folded rectangle (top-right corner triangle).
+ *   - `hnote`           : hexagon (left/right edges pinched to a point).
+ *   - `rnote`           : plain rectangle (no fold flap).
+ */
+export type NoteShape = 'note' | 'hnote' | 'rnote';
 
 export interface NoteStmt {
   type: 'note';
+  shape: NoteShape;
   position: NotePosition;
-  targets: [string] | [string, string];
+  /**
+   * Participant IDs the note attaches to:
+   *   - `left`/`right`: exactly one target
+   *   - `over`: one or two targets (start, end)
+   *   - `across`: empty array — note spans the whole diagram
+   */
+  targets: string[];
   text: string;
+  /** Optional `#color` background from `note … #color` directive. */
+  color?: string;
 }
 
 export interface ActivateStmt {
@@ -90,7 +107,8 @@ export type GroupKind =
   | 'loop'
   | 'par'
   | 'break'
-  | 'critical';
+  | 'critical'
+  | 'partition';
 
 export interface GroupStartStmt {
   type: 'groupStart';
@@ -139,9 +157,23 @@ export interface AutoNumberStmt {
   format?: string;
 }
 
+/**
+ * `ref over A[, B, ...] : text` — a "reference" box that visually denotes a
+ * sub-sequence elided into another diagram. Renders as a folded-corner box
+ * spanning the listed lanes with a small "ref" tab at the top-left.
+ * Block form (`ref over A ... end ref`) supports multi-line text.
+ */
+export interface RefStmt {
+  type: 'ref';
+  targets: string[];
+  text: string;
+}
+
 export interface DividerStmt {
   type: 'divider';
   label: string;
+  /** `'divider'` is the boxed `==title==` form; `'delay'` is `... long delay ...`. */
+  kind?: 'divider' | 'delay';
 }
 
 export interface NewPageStmt {
@@ -160,7 +192,8 @@ export type SequenceStatement =
   | GroupEndStmt
   | AutoNumberStmt
   | DividerStmt
-  | NewPageStmt;
+  | NewPageStmt
+  | RefStmt;
 
 export interface SequenceAst {
   kind: 'sequence';

@@ -11,8 +11,10 @@ import type {
   MessageStmt,
   NewPageStmt,
   NotePosition,
+  NoteShape,
   NoteStmt,
   Participant,
+  RefStmt,
   ParticipantLine,
   ParticipantSection,
   ParticipantShape,
@@ -24,6 +26,7 @@ import {
   AUTONUMBER,
   NEWPAGE,
   DEACTIVATE,
+  DELAY,
   DIVIDER,
   FOOTER_BLOCK,
   FOOTER_END,
@@ -36,12 +39,17 @@ import {
   HEADER_INLINE,
   LINE_COMMENT,
   MESSAGE,
+  NOTE_ACROSS_BLOCK,
+  NOTE_ACROSS_INLINE,
   NOTE_END,
   NOTE_OVER_BLOCK,
   NOTE_OVER_INLINE,
   NOTE_SIDE_BLOCK,
   NOTE_SIDE_INLINE,
   PARTICIPANT,
+  REF_END,
+  REF_OVER_BLOCK,
+  REF_OVER_INLINE,
   TITLE,
   WRAPPER,
   extractName,
@@ -49,13 +57,48 @@ import {
 
 interface PendingNote {
   position: NotePosition;
-  targets: [string] | [string, string];
+  shape: NoteShape;
+  targets: string[];
   buffer: string[];
+  color?: string;
 }
 
 interface PendingPartBlock {
   participant: Participant;
   buffer: string[];
+}
+
+interface PendingRef {
+  targets: string[];
+  buffer: string[];
+}
+
+/**
+ * Splits a comma-separated participant target list, honouring `"..."` quoted
+ * names. Used by `ref over A, "Bob the Great", C` and similar directives.
+ */
+function parseTargetList(s: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i]!)) i++;
+    if (i >= s.length) break;
+    let token: string;
+    if (s[i] === '"') {
+      const end = s.indexOf('"', i + 1);
+      if (end < 0) { token = s.slice(i + 1).trim(); i = s.length; }
+      else { token = s.slice(i + 1, end); i = end + 1; }
+    } else {
+      let j = i;
+      while (j < s.length && s[j] !== ',') j++;
+      token = s.slice(i, j).trim();
+      i = j;
+    }
+    while (i < s.length && /\s/.test(s[i]!)) i++;
+    if (i < s.length && s[i] === ',') i++;
+    if (token) out.push(token);
+  }
+  return out;
 }
 
 export function parseSequence(source: string): SequenceAst {
@@ -71,6 +114,7 @@ export function parseSequence(source: string): SequenceAst {
   const lines = source.split(/\r\n|\r|\n/);
   let pendingNote: PendingNote | null = null;
   let pendingPartBlock: PendingPartBlock | null = null;
+  let pendingRef: PendingRef | null = null;
   let inBlockComment = false;
   let lastMessage: MessageStmt | null = null;
   let headerBuf: string[] | null = null;
@@ -125,15 +169,33 @@ export function parseSequence(source: string): SequenceAst {
       continue;
     }
 
+    if (pendingRef !== null) {
+      const pr = pendingRef as PendingRef;
+      if (REF_END.test(text)) {
+        const refStmt: RefStmt = {
+          type: 'ref',
+          targets: pr.targets,
+          text: pr.buffer.join('\n'),
+        };
+        ast.statements.push(refStmt);
+        pendingRef = null;
+      } else {
+        pr.buffer.push(raw);
+      }
+      continue;
+    }
+
     if (pendingNote !== null) {
       const pn = pendingNote as PendingNote;
       if (NOTE_END.test(text)) {
         const noteStmt: NoteStmt = {
           type: 'note',
+          shape: pn.shape,
           position: pn.position,
           targets: pn.targets,
           text: pn.buffer.join('\n'),
         };
+        if (pn.color) noteStmt.color = pn.color;
         ast.statements.push(noteStmt);
         pendingNote = null;
       } else {
@@ -177,6 +239,7 @@ export function parseSequence(source: string): SequenceAst {
       addParticipant,
       (note) => { pendingNote = note; },
       (block) => { pendingPartBlock = block; },
+      (ref) => { pendingRef = ref; },
       lastMessage,
     );
     if (stmt) {
@@ -195,6 +258,10 @@ export function parseSequence(source: string): SequenceAst {
       }
     } else if (stmt.type === 'activate' || stmt.type === 'deactivate') {
       addParticipant({ id: stmt.target, label: stmt.target, shape: 'participant' });
+    } else if (stmt.type === 'ref') {
+      for (const t of stmt.targets) {
+        addParticipant({ id: t, label: t, shape: 'participant' });
+      }
     }
   }
 
@@ -206,6 +273,7 @@ function parseStatement(
   addParticipant: (p: Participant) => void,
   setPendingNote: (n: PendingNote) => void,
   setPendingPartBlock: (b: PendingPartBlock) => void,
+  setPendingRef: (r: PendingRef) => void,
   lastMessage: MessageStmt | null,
 ): SequenceStatement | null {
   let m: RegExpExecArray | null;
@@ -260,7 +328,16 @@ function parseStatement(
   }
 
   if ((m = DIVIDER.exec(text))) {
-    const stmt: DividerStmt = { type: 'divider', label: m[1]!.trim() };
+    const stmt: DividerStmt = { type: 'divider', label: m[1]!.trim(), kind: 'divider' };
+    return stmt;
+  }
+
+  if ((m = DELAY.exec(text))) {
+    const stmt: DividerStmt = {
+      type: 'divider',
+      label: unescapeLabel((m[1] ?? '').trim()),
+      kind: 'delay',
+    };
     return stmt;
   }
 
@@ -274,45 +351,113 @@ function parseStatement(
     return stmt;
   }
 
-  if ((m = NOTE_SIDE_INLINE.exec(text))) {
-    const pos = m[1]!.toLowerCase() as NotePosition;
-    const explicit = extractName(m[2], m[3]);
-    const target = explicit || sideNoteFallback(pos, lastMessage);
-    if (!target) return null;
-    const stmt: NoteStmt = {
-      type: 'note',
-      position: pos,
-      targets: [target],
-      text: (m[4] ?? '').trim(),
+  if ((m = REF_OVER_INLINE.exec(text))) {
+    const targets = parseTargetList(m[1]!);
+    if (targets.length === 0) return null;
+    const stmt: RefStmt = {
+      type: 'ref',
+      targets,
+      text: unescapeLabel((m[2] ?? '').trim()),
     };
     return stmt;
   }
 
-  if ((m = NOTE_SIDE_BLOCK.exec(text))) {
-    const pos = m[1]!.toLowerCase() as NotePosition;
-    const explicit = extractName(m[2], m[3]);
+  if ((m = REF_OVER_BLOCK.exec(text))) {
+    const targets = parseTargetList(m[1]!);
+    if (targets.length === 0) return null;
+    setPendingRef({ targets, buffer: [] });
+    return null;
+  }
+
+  if ((m = NOTE_SIDE_INLINE.exec(text))) {
+    const shape = m[1]!.toLowerCase() as NoteShape;
+    const pos = m[2]!.toLowerCase() as NotePosition;
+    const explicit = extractName(m[3], m[4]);
     const target = explicit || sideNoteFallback(pos, lastMessage);
     if (!target) return null;
-    setPendingNote({ position: pos, targets: [target], buffer: [] });
+    const colorRaw = m[5];
+    const stmt: NoteStmt = {
+      type: 'note',
+      shape,
+      position: pos,
+      targets: [target],
+      text: unescapeLabel((m[6] ?? '').trim()),
+    };
+    if (colorRaw) stmt.color = normalizeColor(colorRaw);
+    return stmt;
+  }
+
+  if ((m = NOTE_SIDE_BLOCK.exec(text))) {
+    const shape = m[1]!.toLowerCase() as NoteShape;
+    const pos = m[2]!.toLowerCase() as NotePosition;
+    const explicit = extractName(m[3], m[4]);
+    const target = explicit || sideNoteFallback(pos, lastMessage);
+    if (!target) return null;
+    const colorRaw = m[5];
+    const pending: PendingNote = { position: pos, shape, targets: [target], buffer: [] };
+    if (colorRaw) pending.color = normalizeColor(colorRaw);
+    setPendingNote(pending);
     return null;
   }
 
   if ((m = NOTE_OVER_INLINE.exec(text))) {
-    const a = extractName(m[1], m[2]);
-    const b = extractName(m[3], m[4]);
+    const shape = m[1]!.toLowerCase() as NoteShape;
+    const a = extractName(m[2], m[3]);
+    const b = extractName(m[4], m[5]);
     const targets: [string] | [string, string] = b ? [a, b] : [a];
-    const stmt: NoteStmt = { type: 'note', position: 'over', targets, text: (m[5] ?? '').trim() };
+    const colorRaw = m[6];
+    const stmt: NoteStmt = {
+      type: 'note',
+      shape,
+      position: 'over',
+      targets,
+      text: unescapeLabel((m[7] ?? '').trim()),
+    };
+    if (colorRaw) stmt.color = normalizeColor(colorRaw);
     return stmt;
   }
 
   if ((m = NOTE_OVER_BLOCK.exec(text))) {
-    const a = extractName(m[1], m[2]);
-    const b = extractName(m[3], m[4]);
-    setPendingNote({
+    const shape = m[1]!.toLowerCase() as NoteShape;
+    const a = extractName(m[2], m[3]);
+    const b = extractName(m[4], m[5]);
+    const colorRaw = m[6];
+    const pending: PendingNote = {
       position: 'over',
+      shape,
       targets: b ? [a, b] : [a],
       buffer: [],
-    });
+    };
+    if (colorRaw) pending.color = normalizeColor(colorRaw);
+    setPendingNote(pending);
+    return null;
+  }
+
+  if ((m = NOTE_ACROSS_INLINE.exec(text))) {
+    const shape = m[1]!.toLowerCase() as NoteShape;
+    const colorRaw = m[2];
+    const stmt: NoteStmt = {
+      type: 'note',
+      shape,
+      position: 'across',
+      targets: [],
+      text: unescapeLabel((m[3] ?? '').trim()),
+    };
+    if (colorRaw) stmt.color = normalizeColor(colorRaw);
+    return stmt;
+  }
+
+  if ((m = NOTE_ACROSS_BLOCK.exec(text))) {
+    const shape = m[1]!.toLowerCase() as NoteShape;
+    const colorRaw = m[2];
+    const pending: PendingNote = {
+      position: 'across',
+      shape,
+      targets: [],
+      buffer: [],
+    };
+    if (colorRaw) pending.color = normalizeColor(colorRaw);
+    setPendingNote(pending);
     return null;
   }
 

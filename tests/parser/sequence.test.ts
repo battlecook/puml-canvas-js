@@ -214,7 +214,7 @@ describe('sequence parser — misc', () => {
     const a = ast('@startuml\nA -> B\n== checkpoint ==\nA -> B\n@enduml');
     const dividers = a.statements.filter((s) => s.type === 'divider');
     expect(dividers).toHaveLength(1);
-    expect(dividers[0]).toEqual({ type: 'divider', label: 'checkpoint' });
+    expect(dividers[0]).toEqual({ type: 'divider', label: 'checkpoint', kind: 'divider' });
   });
 });
 
@@ -326,6 +326,142 @@ describe('sequence parser — participants extended', () => {
     expect(msgs[7]).toMatchObject({ startMarker: 'circle', endMarker: 'none',       style: 'dashed' });
     expect(msgs[8]).toMatchObject({ startMarker: 'arrow',  endMarker: 'arrow',      style: 'solid' });
     expect(msgs[9]).toMatchObject({ startMarker: 'arrow',  endMarker: 'circle',     style: 'solid' });
+  });
+
+  it('captures `#color` on all note forms (inline/block, side/over)', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'participant Alice',
+        'participant Bob',
+        'note left of Alice #aqua',
+        'block aqua',
+        'end note',
+        'note right of Alice #99FF99 : inline green',
+        'note over Alice #FFAAAA: inline pink',
+        'note over Alice, Bob #lightgray',
+        'block over both',
+        'end note',
+        '@enduml',
+      ].join('\n'),
+    );
+    const notes = a.statements.filter((s) => s.type === 'note') as Array<{
+      position: string; color?: string; targets: string[]; text: string;
+    }>;
+    expect(notes).toHaveLength(4);
+    expect(notes[0]).toMatchObject({ position: 'left',  color: 'aqua',      targets: ['Alice'], text: 'block aqua' });
+    expect(notes[1]).toMatchObject({ position: 'right', color: '#99FF99',   targets: ['Alice'], text: 'inline green' });
+    expect(notes[2]).toMatchObject({ position: 'over',  color: '#FFAAAA',   targets: ['Alice'], text: 'inline pink' });
+    expect(notes[3]).toMatchObject({ position: 'over',  color: 'lightgray', targets: ['Alice', 'Bob'], text: 'block over both' });
+  });
+
+  it('parses `ref over A, B : text` (inline form)', () => {
+    const a = ast('@startuml\nparticipant Alice\nparticipant Bob\nref over Alice, Bob : init\n@enduml');
+    const ref = a.statements.find((s) => s.type === 'ref') as {
+      targets: string[]; text: string;
+    };
+    expect(ref).toEqual({ type: 'ref', targets: ['Alice', 'Bob'], text: 'init' });
+  });
+
+  it('parses multi-line `ref over X ... end ref` (block form)', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'participant Bob',
+        'ref over Bob',
+        '  line one',
+        '  line two',
+        'end ref',
+        '@enduml',
+      ].join('\n'),
+    );
+    const ref = a.statements.find((s) => s.type === 'ref') as {
+      targets: string[]; text: string;
+    };
+    expect(ref.targets).toEqual(['Bob']);
+    expect(ref.text).toContain('line one');
+    expect(ref.text).toContain('line two');
+  });
+
+  it('parses `... text ...` as a delay-kind divider', () => {
+    const a = ast('@startuml\nA -> B\n... long delay ...\nA -> B\n@enduml');
+    const div = a.statements.find((s) => s.type === 'divider') as {
+      label: string; kind: string;
+    };
+    expect(div).toMatchObject({ kind: 'delay', label: 'long delay' });
+  });
+
+  it('parses `partition <label>` ... `end` as a group', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'partition p1',
+        'A -> B',
+        'end',
+        '@enduml',
+      ].join('\n'),
+    );
+    const starts = a.statements.filter((s) => s.type === 'groupStart') as Array<{
+      kind: string; label: string;
+    }>;
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({ kind: 'partition', label: 'p1' });
+  });
+
+  it('parses `note across` / `hnote across` / `rnote across`', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'A -> B',
+        'note across: a inline',
+        'hnote across: b inline',
+        'rnote across',
+        'block',
+        'end rnote',
+        '@enduml',
+      ].join('\n'),
+    );
+    const notes = a.statements.filter((s) => s.type === 'note') as Array<{
+      shape: string; position: string; targets: string[]; text: string;
+    }>;
+    expect(notes).toHaveLength(3);
+    expect(notes[0]).toMatchObject({ shape: 'note',  position: 'across', targets: [], text: 'a inline' });
+    expect(notes[1]).toMatchObject({ shape: 'hnote', position: 'across', targets: [], text: 'b inline' });
+    expect(notes[2]).toMatchObject({ shape: 'rnote', position: 'across', targets: [], text: 'block' });
+  });
+
+  it('parses hnote and rnote variants (inline and block, with end variants)', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'A -> A',
+        'hnote over A : hex inline',
+        'rnote over A : rect inline',
+        'hnote over A',
+        'h1',
+        'endhnote',
+        'rnote over A',
+        'r1',
+        'endrnote',
+        '@enduml',
+      ].join('\n'),
+    );
+    const notes = a.statements.filter((s) => s.type === 'note') as Array<{
+      shape: string; text: string;
+    }>;
+    expect(notes).toHaveLength(4);
+    expect(notes[0]).toMatchObject({ shape: 'hnote', text: 'hex inline' });
+    expect(notes[1]).toMatchObject({ shape: 'rnote', text: 'rect inline' });
+    expect(notes[2]).toMatchObject({ shape: 'hnote', text: 'h1' });
+    expect(notes[3]).toMatchObject({ shape: 'rnote', text: 'r1' });
+  });
+
+  it('unescapes `\\n` in inline note text', () => {
+    const a = ast(
+      '@startuml\nA -> A\nnote over A: line1\\nline2\n@enduml',
+    );
+    const note = a.statements.find((s) => s.type === 'note') as { text: string };
+    expect(note.text).toBe('line1\nline2');
   });
 
   it('parses `newpage` (bare and with title, \\n unescaped)', () => {

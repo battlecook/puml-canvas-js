@@ -56,6 +56,7 @@ export type {
   ArrowStyle,
   MessageStmt,
   NotePosition,
+  NoteShape,
   NoteStmt,
   ActivateStmt,
   DeactivateStmt,
