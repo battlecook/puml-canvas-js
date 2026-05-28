@@ -31,4 +31,11 @@ export interface EdgeStyle {
   color: string;
   fontFamily: string;
   labelFontSize: number;
+  /**
+   * Optional color override for the arrow-head / triangle / diamond glyph.
+   * When omitted, the marker module's default (#222) is used. Use case
+   * diagrams set this from `skinparam ArrowColor` so the arrowhead matches
+   * the (recolored) line stroke.
+   */
+  markerColor?: string;
 }

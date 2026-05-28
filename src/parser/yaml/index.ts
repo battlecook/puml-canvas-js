@@ -19,11 +19,12 @@ interface State {
 
 export function parseYaml(source: string): YamlAst {
   const rawLines = source.split(/\r\n|\r|\n/);
+  const { lines: afterStyle, styles } = extractStyleBlocks(rawLines);
   const highlights: string[][] = [];
   const bodyLines: string[] = [];
   let title = '';
 
-  for (const raw of rawLines) {
+  for (const raw of afterStyle) {
     const t = raw.trim();
     if (WRAPPER.test(t)) continue;
     if (HIGHLIGHT.test(t)) {
@@ -53,7 +54,86 @@ export function parseYaml(source: string): YamlAst {
     parseError = e instanceof Error ? e.message : String(e);
   }
 
-  return { kind: 'yaml', title, data, highlights, parseError };
+  const ast: YamlAst = { kind: 'yaml', title, data, highlights, parseError };
+  if (Object.keys(styles).length > 0) ast.styles = styles;
+  return ast;
+}
+
+/**
+ * Pre-pass: strips `<style> ... </style>` blocks and collects nested
+ * selector/property declarations into a flat dotted-key map (all lowercase).
+ *
+ * Grammar (minimal subset):
+ *
+ *   <style>
+ *     sel1 {
+ *       Prop Value
+ *       sel2 {           // nested selectors allowed
+ *         Prop Value
+ *       }
+ *     }
+ *   </style>
+ *
+ * Last write wins for duplicate paths (matches PlantUML's documented behavior
+ * for repeated property declarations within the same selector).
+ */
+function extractStyleBlocks(
+  rawLines: string[],
+): { lines: string[]; styles: Record<string, string> } {
+  const out: string[] = [];
+  const styles: Record<string, string> = {};
+  let inStyleBlock = false;
+  const selStack: string[] = [];
+
+  for (const raw of rawLines) {
+    const text = raw.trim();
+
+    if (!inStyleBlock) {
+      if (/^<style>\s*$/i.test(text)) {
+        inStyleBlock = true;
+        selStack.length = 0;
+        continue;
+      }
+      out.push(raw);
+      continue;
+    }
+
+    if (/^<\/style>\s*$/i.test(text)) {
+      inStyleBlock = false;
+      selStack.length = 0;
+      continue;
+    }
+    if (!text) continue;
+
+    // Close brace pops a selector frame.
+    if (text === '}' || /^\}\s*$/.test(text)) {
+      selStack.pop();
+      continue;
+    }
+
+    // Selector opener: `name {` (open block) or `name` (open block, no brace).
+    const open = /^([A-Za-z_][A-Za-z0-9_-]*)\s*\{\s*$/.exec(text);
+    if (open) {
+      selStack.push(open[1]!.toLowerCase());
+      continue;
+    }
+
+    // Property line: `Property Value` (also accepts trailing `}` for one-line form).
+    const oneLineClose = /^(\S+)\s+(.+?)\s*\}\s*$/.exec(text);
+    if (oneLineClose && selStack.length > 0) {
+      const path = [...selStack, oneLineClose[1]!.toLowerCase()].join('.');
+      styles[path] = oneLineClose[2]!.trim();
+      selStack.pop();
+      continue;
+    }
+    const prop = /^(\S+)\s+(.+)$/.exec(text);
+    if (prop && selStack.length > 0) {
+      const path = [...selStack, prop[1]!.toLowerCase()].join('.');
+      styles[path] = prop[2]!.trim();
+    }
+  }
+
+  return { lines: out, styles };
 }
 
 function parseHighlightPath(text: string): string[] {

@@ -26,11 +26,12 @@ export function markerLength(m: EndMarker): number {
   }
 }
 
-export function drawMarker(m: EndMarker, end: Vec, prev: Vec): Shape | null {
+export function drawMarker(m: EndMarker, end: Vec, prev: Vec, colorOverride?: string): Shape | null {
   if (m === 'none') return null;
   const dir = unitFrom(prev, end);
   if (dir.x === 0 && dir.y === 0) return null;
   const p = { x: -dir.y, y: dir.x };
+  const color = colorOverride ?? COLOR;
 
   switch (m) {
     case 'arrow': {
@@ -44,7 +45,7 @@ export function drawMarker(m: EndMarker, end: Vec, prev: Vec): Shape | null {
           [end.x, end.y],
           [a2.x, a2.y],
         ],
-        style: { stroke: COLOR, strokeWidth: 1.2, fill: 'none' },
+        style: { stroke: color, strokeWidth: 1.2, fill: 'none' },
       };
     }
     case 'triangle': {
@@ -58,7 +59,7 @@ export function drawMarker(m: EndMarker, end: Vec, prev: Vec): Shape | null {
           [b1.x, b1.y],
           [b2.x, b2.y],
         ],
-        style: { stroke: COLOR, strokeWidth: 1, fill: FILL_WHITE },
+        style: { stroke: color, strokeWidth: 1, fill: FILL_WHITE },
       };
     }
     case 'diamond-filled':
@@ -76,9 +77,9 @@ export function drawMarker(m: EndMarker, end: Vec, prev: Vec): Shape | null {
           [s2.x, s2.y],
         ],
         style: {
-          stroke: COLOR,
+          stroke: color,
           strokeWidth: 1,
-          fill: m === 'diamond-filled' ? COLOR : FILL_WHITE,
+          fill: m === 'diamond-filled' ? color : FILL_WHITE,
         },
       };
     }

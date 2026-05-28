@@ -9,11 +9,18 @@ export type StateKind =
   | 'join'
   | 'history';
 
+export type StateLineStyle = 'solid' | 'dashed' | 'dotted' | 'bold';
+
 export interface StateNode {
   id: string;
   name: string;
   stateKind: StateKind;
   children: StateNode[];
+  description?: string;
+  fill?: string;
+  lineColor?: string;
+  lineStyle?: StateLineStyle;
+  textColor?: string;
 }
 
 export interface StateTransition {

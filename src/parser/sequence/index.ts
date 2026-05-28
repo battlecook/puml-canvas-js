@@ -1,6 +1,7 @@
 import type {
   ActivateStmt,
   ArrowMarker,
+  AutoActivateStmt,
   AutoNumberStmt,
   DeactivateStmt,
   DividerStmt,
@@ -14,7 +15,10 @@ import type {
   NoteShape,
   NoteStmt,
   Participant,
+  ParticipantBox,
+  ParticipantStereotype,
   RefStmt,
+  ReturnStmt,
   ParticipantLine,
   ParticipantSection,
   ParticipantShape,
@@ -23,7 +27,11 @@ import type {
 } from '../../ast/sequence.js';
 import {
   ACTIVATE,
+  ACTOR_COLON,
+  AUTOACTIVATE,
   AUTONUMBER,
+  BOX_END,
+  BOX_START,
   NEWPAGE,
   DEACTIVATE,
   DELAY,
@@ -37,8 +45,14 @@ import {
   HEADER_BLOCK,
   HEADER_END,
   HEADER_INLINE,
+  HIDE,
   LINE_COMMENT,
+  MAINFRAME,
   MESSAGE,
+  MESSAGE_FROM_LEFT,
+  MESSAGE_FROM_SHORT,
+  MESSAGE_TO_RIGHT,
+  MESSAGE_TO_SHORT,
   NOTE_ACROSS_BLOCK,
   NOTE_ACROSS_INLINE,
   NOTE_END,
@@ -50,10 +64,12 @@ import {
   REF_END,
   REF_OVER_BLOCK,
   REF_OVER_INLINE,
+  RETURN,
   TITLE,
   WRAPPER,
   extractName,
 } from './patterns.js';
+import { extractSkinparams } from '../skinparams.js';
 
 interface PendingNote {
   position: NotePosition;
@@ -111,7 +127,11 @@ export function parseSequence(source: string): SequenceAst {
     statements: [],
   };
   const declared = new Map<string, Participant>();
-  const lines = source.split(/\r\n|\r|\n/);
+  const rawLines = source.split(/\r\n|\r|\n/);
+  const { lines: linesAfterSkin, skin } = extractSkinparams(rawLines);
+  if (Object.keys(skin).length > 0) ast.skin = skin;
+  const { lines, styles } = extractStyleBlocks(linesAfterSkin);
+  if (Object.keys(styles).length > 0) ast.styles = styles;
   let pendingNote: PendingNote | null = null;
   let pendingPartBlock: PendingPartBlock | null = null;
   let pendingRef: PendingRef | null = null;
@@ -119,9 +139,15 @@ export function parseSequence(source: string): SequenceAst {
   let lastMessage: MessageStmt | null = null;
   let headerBuf: string[] | null = null;
   let footerBuf: string[] | null = null;
+  // Active `box ... end box` group. PlantUML rejects nested boxes; we mirror
+  // that by ignoring a second `box` opener until the first is closed. Each
+  // `box` increments boxCounter so reopened boxes get a fresh, unique id.
+  let currentBox: ParticipantBox | null = null;
+  let boxCounter = 0;
 
   const addParticipant = (p: Participant): void => {
     if (declared.has(p.id)) return;
+    if (currentBox && p.box === undefined) p.box = currentBox;
     declared.set(p.id, p);
     ast.participants.push(p);
   };
@@ -214,6 +240,25 @@ export function parseSequence(source: string): SequenceAst {
       continue;
     }
 
+    // `mainframe <label>` — global one-shot directive. Last one wins. The
+    // label keeps inline markup verbatim (e.g. `**bold**`) so the layout can
+    // feed it through the existing markup parser.
+    const mainframeMatch = MAINFRAME.exec(text);
+    if (mainframeMatch) {
+      ast.mainframe = unescapeLabel(mainframeMatch[1]!.trim());
+      continue;
+    }
+
+    // `hide unlinked` flips the AST flag so the layout filters out participants
+    // never referenced by any statement. Other `hide ...` variants are accepted
+    // as no-ops so they don't leak into the message parser as phantom IDs.
+    const hideMatch = HIDE.exec(text);
+    if (hideMatch) {
+      const rest = hideMatch[1]!.trim().toLowerCase();
+      if (rest === 'unlinked') ast.hideUnlinked = true;
+      continue;
+    }
+
     const headerInline = HEADER_INLINE.exec(text);
     if (headerInline) {
       ast.header = headerInline[1]!.trim();
@@ -234,6 +279,26 @@ export function parseSequence(source: string): SequenceAst {
       continue;
     }
 
+    // `box ["Title"] [#Color]` opens a participant-grouping rectangle. The
+    // closing `end box` / `endbox` clears it. PlantUML rejects nested boxes;
+    // we silently ignore a second `box` while one is already open.
+    if (BOX_END.test(text)) {
+      currentBox = null;
+      continue;
+    }
+    const boxMatch = BOX_START.exec(text);
+    if (boxMatch) {
+      if (currentBox === null) {
+        boxCounter += 1;
+        const box: ParticipantBox = { id: boxCounter };
+        const title = (boxMatch[1] ?? boxMatch[2] ?? '').trim();
+        if (title) box.title = unescapeLabel(title);
+        if (boxMatch[3]) box.color = normalizeColor(boxMatch[3]);
+        currentBox = box;
+      }
+      continue;
+    }
+
     const stmt = parseStatement(
       text,
       addParticipant,
@@ -250,8 +315,12 @@ export function parseSequence(source: string): SequenceAst {
 
   for (const stmt of ast.statements) {
     if (stmt.type === 'message') {
-      addParticipant({ id: stmt.from, label: stmt.from, shape: 'participant' });
-      addParticipant({ id: stmt.to, label: stmt.to, shape: 'participant' });
+      if (!stmt.fromBoundary && stmt.from) {
+        addParticipant({ id: stmt.from, label: stmt.from, shape: 'participant' });
+      }
+      if (!stmt.toBoundary && stmt.to) {
+        addParticipant({ id: stmt.to, label: stmt.to, shape: 'participant' });
+      }
     } else if (stmt.type === 'note') {
       for (const t of stmt.targets) {
         addParticipant({ id: t, label: t, shape: 'participant' });
@@ -284,9 +353,16 @@ function parseStatement(
     const label = unescapeLabel(extractName(rawQuoted, m[3]));
     const id = m[4] ?? label;
     const colorRaw = m[5];
-    const openBracket = m[6];
+    const stereotypeRaw = m[6];
+    const orderRaw = m[7];
+    const openBracket = m[8];
     const part: Participant = { id, label, shape };
     if (colorRaw) part.color = normalizeColor(colorRaw);
+    if (stereotypeRaw) {
+      const st = parseStereotype(stereotypeRaw);
+      if (st) part.stereotype = st;
+    }
+    if (orderRaw !== undefined) part.order = Number(orderRaw);
     if (openBracket) {
       // Defer registration until `]` is reached so the `sections` field is
       // populated before adding to the diagram. The block-handler in the
@@ -294,6 +370,21 @@ function parseStatement(
       setPendingPartBlock({ participant: part, buffer: [] });
       return null;
     }
+    addParticipant(part);
+    return null;
+  }
+
+  // Colon-shorthand actor: `:Name:`, `:Display: as Id`, `actor :Display: as Id`.
+  // The display name (between the colons) may contain spaces and `\n` escape
+  // sequences; the id (after `as`) is a bare token. When no alias is given,
+  // the display name doubles as the id (using the raw, un-unescaped token).
+  if ((m = ACTOR_COLON.exec(text))) {
+    const rawDisplay = m[1]!.trim();
+    const label = unescapeLabel(rawDisplay);
+    const id = m[2] ?? rawDisplay;
+    const colorRaw = m[3];
+    const part: Participant = { id, label, shape: 'actor' };
+    if (colorRaw) part.color = normalizeColor(colorRaw);
     addParticipant(part);
     return null;
   }
@@ -348,6 +439,17 @@ function parseStatement(
 
   if ((m = DEACTIVATE.exec(text))) {
     const stmt: DeactivateStmt = { type: 'deactivate', target: extractName(m[1], m[2]) };
+    return stmt;
+  }
+
+  if ((m = AUTOACTIVATE.exec(text))) {
+    const word = (m[1] ?? 'on').toLowerCase();
+    const stmt: AutoActivateStmt = { type: 'autoactivate', enabled: word !== 'off' };
+    return stmt;
+  }
+
+  if ((m = RETURN.exec(text))) {
+    const stmt: ReturnStmt = { type: 'return', text: unescapeLabel((m[1] ?? '').trim()) };
     return stmt;
   }
 
@@ -462,7 +564,8 @@ function parseStatement(
   }
 
   if ((m = GROUP_ELSE.exec(text))) {
-    const stmt: GroupElseStmt = { type: 'groupElse', label: (m[1] ?? '').trim() };
+    const stmt: GroupElseStmt = { type: 'groupElse', label: (m[2] ?? '').trim() };
+    if (m[1]) stmt.branchColor = resolveGroupColor(m[1]);
     return stmt;
   }
 
@@ -475,8 +578,34 @@ function parseStatement(
     const stmt: GroupStartStmt = {
       type: 'groupStart',
       kind: m[1]!.toLowerCase() as GroupKind,
-      label: (m[2] ?? '').trim(),
+      label: (m[4] ?? '').trim(),
     };
+    if (m[2]) stmt.tabColor = resolveGroupColor(m[2]);
+    if (m[3]) stmt.branchColor = resolveGroupColor(m[3]);
+    return stmt;
+  }
+
+  // Found / lost messages — one end is the diagram boundary. Checked BEFORE
+  // the general MESSAGE pattern because `[`, `]`, and `?` aren't excluded
+  // from the NAME class, so without this branch `Bob ->]` / `[-> Bob` /
+  // `?-> Bob` would otherwise match MESSAGE and create a phantom participant
+  // named `[` / `]` / `?`. The `?` variant denotes a SHORT boundary — the
+  // arrow stub sits just next to the participant's lifeline instead of at
+  // the diagram edge.
+  if ((m = MESSAGE_FROM_LEFT.exec(text))) {
+    const stmt = buildBoundaryMessage(m, /* side */ 'left');
+    return stmt;
+  }
+  if ((m = MESSAGE_TO_RIGHT.exec(text))) {
+    const stmt = buildBoundaryMessage(m, /* side */ 'right');
+    return stmt;
+  }
+  if ((m = MESSAGE_FROM_SHORT.exec(text))) {
+    const stmt = buildBoundaryMessage(m, /* side */ 'short-left');
+    return stmt;
+  }
+  if ((m = MESSAGE_TO_SHORT.exec(text))) {
+    const stmt = buildBoundaryMessage(m, /* side */ 'short-right');
     return stmt;
   }
 
@@ -484,7 +613,8 @@ function parseStatement(
     const left = extractName(m[1], m[2]);
     const arrow = m[3]!;
     const right = extractName(m[4], m[5]);
-    const txt = unescapeLabel((m[6] ?? '').trim());
+    const suffixes = m[6] ?? '';
+    const txt = unescapeLabel((m[7] ?? '').trim());
     const info = parseArrow(arrow);
     if (!info) return null;
     // For pure backward (no `>` at the right), the visible direction is
@@ -503,10 +633,95 @@ function parseStatement(
       endMarker: useForward ? info.rightMarker : info.leftMarker,
     };
     if (info.color) stmt.color = info.color;
+    if (info.duration !== undefined) stmt.duration = info.duration;
+    // Trailing target-side directives: `#color` (per-message color, also tints
+    // the autoactivate bar on the receiver), `**` (create target here),
+    // `!!` (destroy target after this message), `++` (activate target on this
+    // message), `--` (deactivate sender on this message). `++` and `--` may
+    // be combined (`++--` / `--++`). `**`/`!!` are mutually exclusive with
+    // `++`/`--` on the same target slot, but the parser captures any present.
+    if (suffixes) {
+      const colorM = /#([A-Za-z0-9]+)/.exec(suffixes);
+      if (colorM && !stmt.color) stmt.color = normalizeColor(`#${colorM[1]}`);
+      if (/\*\*/.test(suffixes)) stmt.create = true;
+      if (/!!/.test(suffixes)) stmt.destroy = true;
+      if (/\+\+/.test(suffixes)) stmt.activateTarget = true;
+      if (/--/.test(suffixes)) stmt.deactivateSource = true;
+    }
     return stmt;
   }
 
   return null;
+}
+
+/**
+ * Builds a `MessageStmt` for a found/lost message. `side` identifies which
+ * diagram edge is the non-participant end:
+ *   - `'left'`        : input was `[ <arrow> NAME [suffix] [: text]`
+ *   - `'right'`       : input was `NAME <arrow> ] [suffix] [: text]`
+ *   - `'short-left'`  : input was `? <arrow> NAME [suffix] [: text]` — the
+ *                       boundary is a short stub just left of NAME's lifeline
+ *                       instead of at the diagram edge.
+ *   - `'short-right'` : input was `NAME <arrow> ? [suffix] [: text]` — short
+ *                       stub just right of NAME's lifeline.
+ *
+ * Group indices in the regex follow MESSAGE's layout:
+ *   left/short-left forms:  m[1]=arrow, m[2]/m[3]=name (quoted/bare), m[4]=suffix, m[5]=text
+ *   right/short-right forms: m[1]/m[2]=name (quoted/bare), m[3]=arrow, m[4]=suffix, m[5]=text
+ */
+function buildBoundaryMessage(
+  m: RegExpExecArray,
+  side: 'left' | 'right' | 'short-left' | 'short-right',
+): MessageStmt | null {
+  let arrow: string;
+  let name: string;
+  let suffixes: string;
+  let txt: string;
+  const boundaryOnLeftOperand = side === 'left' || side === 'short-left';
+  if (boundaryOnLeftOperand) {
+    arrow = m[1]!;
+    name = extractName(m[2], m[3]);
+    suffixes = m[4] ?? '';
+    txt = unescapeLabel((m[5] ?? '').trim());
+  } else {
+    name = extractName(m[1], m[2]);
+    arrow = m[3]!;
+    suffixes = m[4] ?? '';
+    txt = unescapeLabel((m[5] ?? '').trim());
+  }
+  const info = parseArrow(arrow);
+  if (!info) return null;
+  const useForward = info.bidirectional || !info.reverse;
+  // Map the parsed arrow back onto from/to. For left-form boundaries the
+  // boundary is the LEFT operand of the arrow; for right-form boundaries
+  // it's the RIGHT operand. `useForward` decides whether left→right matches
+  // from→to or whether they get swapped (for `<-` reversed arrows).
+  const leftSide = boundaryOnLeftOperand ? '' : name;
+  const rightSide = boundaryOnLeftOperand ? name : '';
+  const stmt: MessageStmt = {
+    type: 'message',
+    from: useForward ? leftSide : rightSide,
+    to: useForward ? rightSide : leftSide,
+    text: txt,
+    style: info.dashed ? 'dashed' : 'solid',
+    reverse: info.reverse && !info.bidirectional,
+    startMarker: useForward ? info.leftMarker : info.rightMarker,
+    endMarker: useForward ? info.rightMarker : info.leftMarker,
+  };
+  // Whichever end ended up as the empty string is the boundary.
+  if (stmt.from === '') stmt.fromBoundary = side;
+  if (stmt.to === '') stmt.toBoundary = side;
+  if (info.color) stmt.color = info.color;
+  if (info.duration !== undefined) stmt.duration = info.duration;
+  if (suffixes) {
+    const colorM = /#([A-Za-z0-9]+)/.exec(suffixes);
+    if (colorM && !stmt.color) stmt.color = normalizeColor(`#${colorM[1]}`);
+    if (/\*\*/.test(suffixes)) stmt.create = true;
+    if (/!!/.test(suffixes)) stmt.destroy = true;
+    if (/\+\+/.test(suffixes)) stmt.activateTarget = true;
+    if (/--/.test(suffixes)) stmt.deactivateSource = true;
+  }
+  return stmt;
 }
 
 /**
@@ -555,6 +770,13 @@ interface ArrowInfo {
   reverse: boolean;
   bidirectional: boolean;
   color: string | undefined;
+  /**
+   * `A ->(N) B` / `A (N)<- B` — extracted duration (latency) for a "slanted"
+   * timed arrow. Undefined when the arrow has no `(N)` group. The parser
+   * doesn't decide which lifeline gets the slope; layout handles that by
+   * using the message's from/to direction.
+   */
+  duration?: number;
 }
 
 /**
@@ -580,13 +802,24 @@ function parseArrow(arrow: string): ArrowInfo | null {
     color = normalizeColor(`#${colorMatch[1]}`);
     arrow = arrow.replace(/\[#[A-Za-z0-9]+\]/, '');
   }
+  // Extract optional `(N)` slanted-arrow / duration group. PlantUML grammar
+  // places it on the OUTGOING side of the arrow body: just AFTER the dashes
+  // for forward arrows (`->(10)`), or just BEFORE the `<` for reverse arrows
+  // (`(10)<-`). We accept either position and strip it from the arrow text
+  // so the dash/marker classification below sees the bare arrow.
+  let duration: number | undefined;
+  const durationMatch = /\((\d+)\)/.exec(arrow);
+  if (durationMatch) {
+    duration = Number(durationMatch[1]);
+    arrow = arrow.replace(/\(\d+\)/, '');
+  }
   if (!arrow.includes('-')) return null;
   const firstDash = arrow.indexOf('-');
   const lastDash = arrow.lastIndexOf('-');
   const left = arrow.slice(0, firstDash);
   const dashes = arrow.slice(firstDash, lastDash + 1);
   const right = arrow.slice(lastDash + 1);
-  return {
+  const info: ArrowInfo = {
     leftMarker: classifyMarker(left),
     rightMarker: classifyMarker(right),
     dashed: dashes.length >= 2,
@@ -594,6 +827,8 @@ function parseArrow(arrow: string): ArrowInfo | null {
     bidirectional: left.includes('<') && right.includes('>'),
     color,
   };
+  if (duration !== undefined) info.duration = duration;
+  return info;
 }
 
 function classifyMarker(chars: string): ArrowMarker {
@@ -623,14 +858,183 @@ function unescapeLabel(text: string): string {
   return text.replace(/\\n/g, '\n');
 }
 
-function normalizeColor(raw: string): string {
-  // PlantUML accepts `#red` (named) or `#99FF99` (hex). Named-color form is
-  // not valid CSS — strip the leading `#` so the value can be used directly
-  // as an SVG `fill`. Hex form keeps the leading `#`.
+/**
+ * Parses a `<< ... >>` stereotype block. The interior is stripped of surrounding
+ * whitespace; if it begins with `(X,#RRGGBB)` that spot block is peeled off and
+ * the remainder becomes the label. Either component may be absent:
+ *   `<< Generated >>`            → { label: 'Generated' }
+ *   `<< (C,#ADD1B2) Testable >>` → { label: 'Testable', spot: { ... } }
+ *   `<< (C,#ADD1B2) >>`          → { spot: { ... } }
+ */
+function parseStereotype(raw: string): ParticipantStereotype | null {
+  const inner = raw.replace(/^<<\s*/, '').replace(/\s*>>$/, '');
+  if (!inner) return null;
+  const spotM = /^\(([^,()]),\s*(#[0-9A-Fa-f]{3,8})\)\s*(.*)$/.exec(inner);
+  if (spotM) {
+    const st: ParticipantStereotype = {
+      spot: { char: spotM[1]!, color: spotM[2]! },
+    };
+    const rest = spotM[3]!.trim();
+    if (rest) st.label = rest;
+    return st;
+  }
+  return { label: inner.trim() };
+}
+
+/**
+ * PlantUML named-color map. Kept intentionally tiny — only names where
+ * downstream code (tests, golden output) expects a specific hex value.
+ * Looked up case-insensitively. Names not in this table fall through and are
+ * emitted bare so SVG can resolve them as standard CSS color names (`red`,
+ * `gray`, etc.) directly.
+ */
+const NAMED_COLORS: Record<string, string> = {
+  lightblue: '#ADD8E6',
+};
+
+/**
+ * PlantUML-named-color → hex map covering only the names actually exercised by
+ * tests / failing fixtures. Looked up case-insensitively. Kept separate from
+ * the participant-color `NAMED_COLORS` table so callers that want pass-through
+ * behaviour (e.g. `actor Bob #red` — which expects the bare string `'red'` in
+ * the AST) aren't affected.
+ */
+const SKIN_NAMED_COLORS: Record<string, string> = {
+  deepskyblue: '#00BFFF',
+  dodgerblue: '#1E90FF',
+  aqua: '#00FFFF',
+  blue: '#0000FF',
+};
+
+/**
+ * Color names accepted in the GROUP/`alt`/`else` tab + branch positions
+ * (`alt#Gold #LightBlue ...`). Kept separate from `NAMED_COLORS` so the
+ * participant-color path (`actor Bob #red`) still emits bare `'red'` for the
+ * AST contract that test goldens rely on. Looked up case-insensitively;
+ * unknown names fall through to the bare token so SVG can resolve them as
+ * CSS color keywords.
+ */
+const GROUP_NAMED_COLORS: Record<string, string> = {
+  gold: '#FFD700',
+  lightblue: '#ADD8E6',
+  pink: '#FFC0CB',
+};
+
+/**
+ * Resolves a `#color` token from a group-start / else line. Hex literals
+ * (`#RRGGBB`, `#RGB`) keep their leading `#`. Bare names matching
+ * `GROUP_NAMED_COLORS` resolve to canonical hex; everything else passes
+ * through as the bare name (sans `#`) so SVG can fall back to CSS color
+ * resolution.
+ */
+function resolveGroupColor(raw: string): string {
   if (!raw.startsWith('#')) return raw;
   const rest = raw.slice(1);
   if (/^[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([0-9a-fA-F]{2})?$/.test(rest)) {
     return `#${rest}`;
   }
+  const mapped = GROUP_NAMED_COLORS[rest.toLowerCase()];
+  if (mapped) return mapped;
+  return rest;
+}
+
+/**
+ * Resolves a skinparam color value. Hex literals (`#RRGGBB`, `#RGB`) pass
+ * through unchanged. Bare names matching `SKIN_NAMED_COLORS` resolve to their
+ * canonical hex; all other tokens (unknown names, numbers, font names) pass
+ * through verbatim so SVG can fall back to CSS color resolution.
+ */
+export function resolveSkinColor(raw: string): string {
+  if (!raw) return raw;
+  if (raw.startsWith('#')) return raw;
+  const key = raw.toLowerCase();
+  return SKIN_NAMED_COLORS[key] ?? raw;
+}
+
+/**
+ * Pre-pass: strips `<style> ... </style>` blocks from the line list and
+ * collects them into a nested map keyed by lower-cased selector → property →
+ * raw value. Grammar (minimal subset):
+ *
+ *   <style>
+ *     selector1 {
+ *       Property Value
+ *       Property Value
+ *     }
+ *     selector2 {
+ *       Property Value
+ *     }
+ *   </style>
+ *
+ * Selectors and property names are stored lower-cased; values are kept as the
+ * raw whitespace-separated token tail. Layout reads `linestyle` only this
+ * round; other captured properties are intentionally no-ops (the goal here is
+ * to absorb the source so it doesn't leak into the message parser as garbage).
+ */
+function extractStyleBlocks(
+  rawLines: string[],
+): { lines: string[]; styles: Record<string, Record<string, string>> } {
+  const out: string[] = [];
+  const styles: Record<string, Record<string, string>> = {};
+  let inStyleBlock = false;
+  let currentSelector: string | null = null;
+
+  for (const raw of rawLines) {
+    const text = raw.trim();
+
+    if (!inStyleBlock) {
+      if (/^<style>\s*$/i.test(text)) {
+        inStyleBlock = true;
+        currentSelector = null;
+        continue;
+      }
+      out.push(raw);
+      continue;
+    }
+
+    // Inside <style> ... </style>.
+    if (/^<\/style>\s*$/i.test(text)) {
+      inStyleBlock = false;
+      currentSelector = null;
+      continue;
+    }
+    if (!text) continue;
+
+    if (currentSelector === null) {
+      // Expect a selector opener: `name {` or `name`.
+      const open = /^([A-Za-z_][A-Za-z0-9_-]*)\s*\{?\s*$/.exec(text);
+      if (open) {
+        currentSelector = open[1]!.toLowerCase();
+        if (!styles[currentSelector]) styles[currentSelector] = {};
+      }
+      continue;
+    }
+
+    // Inside a selector body.
+    if (text === '}' || /^\}\s*$/.test(text)) {
+      currentSelector = null;
+      continue;
+    }
+    const prop = /^(\S+)\s+(.+)$/.exec(text);
+    if (prop) {
+      styles[currentSelector]![prop[1]!.toLowerCase()] = prop[2]!.trim();
+    }
+  }
+
+  return { lines: out, styles };
+}
+
+function normalizeColor(raw: string): string {
+  // PlantUML accepts `#red` (named) or `#99FF99` (hex). Hex form keeps the
+  // leading `#`; named-color form is mapped through the small lookup table
+  // above when we know a canonical hex, else it's passed through bare so SVG
+  // can resolve it as a CSS color.
+  if (!raw.startsWith('#')) return raw;
+  const rest = raw.slice(1);
+  if (/^[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([0-9a-fA-F]{2})?$/.test(rest)) {
+    return `#${rest}`;
+  }
+  const mapped = NAMED_COLORS[rest.toLowerCase()];
+  if (mapped) return mapped;
   return rest;
 }

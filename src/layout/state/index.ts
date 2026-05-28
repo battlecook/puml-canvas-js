@@ -4,7 +4,7 @@ import type {
   StateTransition,
 } from '../../ast/state.js';
 import type { ClassRelationship } from '../../ast/class.js';
-import type { Scene, Shape } from '../../scene/types.js';
+import type { Scene, Shape, Style } from '../../scene/types.js';
 import { measureText } from '../sequence/measure.js';
 import {
   assignLayers,
@@ -291,14 +291,28 @@ function measureState(s: StateNode): BoxSize {
     case 'history': return { w: HISTORY_SIZE, h: HISTORY_SIZE };
     case 'normal':
     default: {
-      const lw = measureText(s.name, FONT_LABEL).width;
-      const lh = measureText(s.name, FONT_LABEL).height;
+      const nameM = measureText(s.name, FONT_LABEL);
+      let w = nameM.width;
+      let h = nameM.height;
+      if (s.description) {
+        const descM = measureText(s.description, FONT_LABEL);
+        w = Math.max(w, descM.width);
+        h += descM.height + 4;
+      }
       return {
-        w: Math.max(NORMAL_MIN_W, lw + NORMAL_PAD_X * 2),
-        h: Math.max(NORMAL_MIN_H, lh + NORMAL_PAD_Y * 2),
+        w: Math.max(NORMAL_MIN_W, w + NORMAL_PAD_X * 2),
+        h: Math.max(NORMAL_MIN_H, h + NORMAL_PAD_Y * 2),
       };
     }
   }
+}
+
+function rectStyleFor(node: StateNode, baseFill: string, baseStroke: string): Style {
+  const style: Style = { fill: node.fill ?? baseFill, stroke: node.lineColor ?? baseStroke, strokeWidth: 1 };
+  if (node.lineStyle === 'bold') style.strokeWidth = 2;
+  else if (node.lineStyle === 'dashed') style.strokeDasharray = '4,2';
+  else if (node.lineStyle === 'dotted') style.strokeDasharray = '2,3';
+  return style;
 }
 
 function drawState(node: StateNode, pos: Position, sz: BoxSize): Shape[] {
@@ -367,23 +381,48 @@ function drawState(node: StateNode, pos: Position, sz: BoxSize): Shape[] {
         },
       ];
     case 'normal':
-    default:
-      return [
+    default: {
+      const textColor = node.textColor ?? '#000';
+      const shapes: Shape[] = [
         {
           type: 'rect',
           x: pos.x, y: pos.y, w: sz.w, h: sz.h,
           rx: 8, ry: 8,
-          style: { fill: COLOR_NORMAL_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+          style: rectStyleFor(node, COLOR_NORMAL_FILL, COLOR_LINE),
         },
-        {
+      ];
+      if (node.description) {
+        const lh = measureText(node.name, FONT_LABEL).height;
+        const nameY = pos.y + NORMAL_PAD_Y + lh / 2;
+        const descY = nameY + lh / 2 + 4 + measureText(node.description, FONT_LABEL).height / 2;
+        shapes.push({
+          type: 'text',
+          x: cx, y: nameY,
+          text: node.name,
+          anchor: 'middle',
+          baseline: 'middle',
+          font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+        });
+        shapes.push({
+          type: 'text',
+          x: cx, y: descY,
+          text: node.description,
+          anchor: 'middle',
+          baseline: 'middle',
+          font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+        });
+      } else {
+        shapes.push({
           type: 'text',
           x: cx, y: cy,
           text: node.name,
           anchor: 'middle',
           baseline: 'middle',
-          font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
-        },
-      ];
+          font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+        });
+      }
+      return shapes;
+    }
   }
 }
 

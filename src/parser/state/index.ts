@@ -1,6 +1,7 @@
 import type {
   StateAst,
   StateKind,
+  StateLineStyle,
   StateNode,
   StateTransition,
 } from '../../ast/state.js';
@@ -12,7 +13,12 @@ const TITLE = /^title\s+(.+)\s*$/i;
 
 const NAME = String.raw`(?:"([^"]+)"|([^\s,"<>{}]+))`;
 const STATE_DECL = new RegExp(
-  String.raw`^state\s+` + NAME + String.raw`(?:\s+as\s+(\S+))?(?:\s+<<\s*([^>]+?)\s*>>)?\s*(\{)?\s*$`,
+  String.raw`^state\s+` + NAME +
+    String.raw`(?:\s+as\s+(\S+))?` +
+    String.raw`(?:\s+<<\s*([^>]+?)\s*>>)?` +
+    String.raw`(?:\s+(#\S+))?` +
+    String.raw`(?:\s*:\s*(.+?))?` +
+    String.raw`\s*(\{)?\s*$`,
   'i',
 );
 const BLOCK_CLOSE = /^\}\s*$/;
@@ -80,9 +86,13 @@ export function parseState(source: string): StateAst {
       const name = (m[1] ?? m[2] ?? '').trim();
       const id = m[3] ?? name;
       const stereotype = (m[4] ?? '').trim().toLowerCase();
+      const styleBlock = m[5];
+      const description = m[6]?.trim();
       const stateKind = STEREOTYPE_TO_KIND[stereotype] ?? 'normal';
       const node = addNode({ id, name, stateKind, children: [] });
-      if (m[5]) parentStack.push(node);
+      if (description) node.description = description;
+      if (styleBlock) applyStyleSuffix(node, styleBlock);
+      if (m[7]) parentStack.push(node);
       continue;
     }
 
@@ -108,6 +118,50 @@ export function parseState(source: string): StateAst {
   }
 
   return ast;
+}
+
+const LINE_STYLE_KEYS = new Set<StateLineStyle>(['solid', 'dashed', 'dotted', 'bold']);
+
+function applyStyleSuffix(node: StateNode, raw: string): void {
+  // Strip a single leading '#'; the block as a whole may start with '#fill'
+  // (e.g. '#pink;line:red') or with a bare style token (e.g. '#line.dotted;line:gold').
+  const trimmed = raw.startsWith('#') ? raw.slice(1) : raw;
+  const segments = trimmed.split(';').map((s) => s.trim()).filter(Boolean);
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]!;
+    // First segment without a known prefix is the fill.
+    if (i === 0 && !/^line[:.]/i.test(seg) && !/^text:/i.test(seg)) {
+      node.fill = normalizeColor(seg);
+      continue;
+    }
+    const lineColor = /^line\s*:\s*(\S+)$/i.exec(seg);
+    if (lineColor) {
+      node.lineColor = normalizeColor(lineColor[1]!);
+      continue;
+    }
+    const lineStyle = /^line\.(bold|dashed|dotted|solid)$/i.exec(seg);
+    if (lineStyle) {
+      const style = lineStyle[1]!.toLowerCase() as StateLineStyle;
+      if (LINE_STYLE_KEYS.has(style)) node.lineStyle = style;
+      continue;
+    }
+    const textColor = /^text\s*:\s*(\S+)$/i.exec(seg);
+    if (textColor) {
+      node.textColor = normalizeColor(textColor[1]!);
+      continue;
+    }
+  }
+}
+
+function normalizeColor(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith('#')) return trimmed;
+  // Hex without '#' (e.g. '00FFFF') becomes '#00FFFF'.
+  if (/^[0-9a-fA-F]{3,8}$/.test(trimmed) && /[a-fA-F]/.test(trimmed)) {
+    return `#${trimmed}`;
+  }
+  return trimmed.toLowerCase();
 }
 
 function normalize(

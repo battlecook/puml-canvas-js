@@ -13,6 +13,7 @@ describe('detectKind', () => {
 
   it('maps non-uml wrappers directly', () => {
     expect(detect('@startmindmap\n* root\n@endmindmap')).toBe('mindmap');
+    expect(detect('@startmindmap\n# root\n## child\n@endmindmap')).toBe('mindmap');
     expect(detect('@startgantt\n[task] lasts 5 days\n@endgantt')).toBe('gantt');
     expect(detect('@startjson\n{"a":1}\n@endjson')).toBe('json');
     expect(detect('@startyaml\na: 1\n@endyaml')).toBe('yaml');
@@ -87,12 +88,82 @@ describe('detectKind', () => {
     expect(detect('@startuml\nAlice <-- Bob\n@enduml')).toBe('sequence');
   });
 
+  it('classifies found/lost boundary messages (`[-> X`, `X ->]`) as sequence', () => {
+    expect(detect('@startuml\n[-> Bob\n@enduml')).toBe('sequence');
+    expect(detect('@startuml\nBob ->]\n@enduml')).toBe('sequence');
+    // `o->o` shouldn't trigger the class-aggregation heuristic on a boundary line.
+    expect(detect('@startuml\n[o->o Bob\nBob o->o]\n@enduml')).toBe('sequence');
+    // Reversed forms.
+    expect(detect('@startuml\n[<- Bob\nBob <-]\n@enduml')).toBe('sequence');
+  });
+
+  it('classifies a sequence diagram with bare `...` delay between arrows as sequence', () => {
+    const src = [
+      '@startuml',
+      'Bob -> Alice : hello',
+      '...',
+      'Alice -> Bob : ok',
+      '@enduml',
+    ].join('\n');
+    expect(detect(src)).toBe('sequence');
+  });
+
+  it('classifies sequence with `... text ...` delay between arrows as sequence', () => {
+    const src = [
+      '@startuml',
+      'Bob -> Alice : hello',
+      '... long delay ...',
+      'Alice -> Bob : ok',
+      '@enduml',
+    ].join('\n');
+    expect(detect(src)).toBe('sequence');
+  });
+
+  it('detects usecase when colon-actor shorthand is paired with a `(usecase)` arrow target', () => {
+    // `:User:` alone weakly signals sequence; the `(Use)` on the SAME line is a
+    // strong usecase signal and must override.
+    expect(detect('@startuml\n:User: --> (Use)\n@enduml')).toBe('usecase');
+  });
+
+  it('detects usecase from `"Display" as (Alias)` (bare quoted form bound to a usecase alias)', () => {
+    const src = [
+      '@startuml',
+      ':User: --> (Use)',
+      '"Use the application" as (Use)',
+      '@enduml',
+    ].join('\n');
+    expect(detect(src)).toBe('usecase');
+  });
+
   it('treats markdown-style `- Action` lines as activity (compatible-viewer extension)', () => {
     const src = [
       '@startuml',
       '- Action 1',
       '- Action 2',
       '- Action 3',
+      '@enduml',
+    ].join('\n');
+    expect(detect(src)).toBe('activity');
+  });
+
+  it('treats `* Action` bullet lines as activity (activity-beta shortcut)', () => {
+    const src = [
+      '@startuml',
+      '* Action 1',
+      '* Action 2',
+      '* Action 3',
+      '@enduml',
+    ].join('\n');
+    expect(detect(src)).toBe('activity');
+  });
+
+  it('treats multi-level `**`/`***` bullets inside @startuml as activity (not class)', () => {
+    const src = [
+      '@startuml',
+      '* Action 1',
+      '** Sub-Action 1.1',
+      '*** Sub-Action 1.2.1',
+      '* Action 2',
       '@enduml',
     ].join('\n');
     expect(detect(src)).toBe('activity');

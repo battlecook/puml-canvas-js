@@ -52,8 +52,13 @@ export function layoutWbs(ast: WbsAst): Scene {
 function layoutNode(node: TreeNode, depth: number): WbsLayout {
   const text = node.text;
   const m = measureText(text, FONT_SIZE);
-  const boxW = Math.max(BOX_MIN_W, m.width + BOX_PAD_X * 2);
-  const boxH = m.height + BOX_PAD_Y * 2;
+  const boxless = node.boxless === true;
+  // Boxless nodes get no horizontal padding (just the text width) and a
+  // tight height — they still need to occupy real space for routing.
+  const boxW = boxless
+    ? Math.max(BOX_MIN_W / 2, m.width + 4)
+    : Math.max(BOX_MIN_W, m.width + BOX_PAD_X * 2);
+  const boxH = boxless ? m.height + 4 : m.height + BOX_PAD_Y * 2;
 
   if (node.children.length === 0) {
     return {
@@ -61,21 +66,42 @@ function layoutNode(node: TreeNode, depth: number): WbsLayout {
       height: boxH,
       centerX: boxW / 2,
       draw(x, y) {
-        return drawBox(text, x, y, boxW, boxH, depth);
+        return drawNode(node, x, y, boxW, boxH, depth);
       },
     };
   }
 
-  const childLayouts = node.children.map((c) => layoutNode(c, depth + 1));
-  let childrenW = 0;
-  for (let i = 0; i < childLayouts.length; i++) {
-    childrenW += childLayouts[i]!.width;
-    if (i < childLayouts.length - 1) childrenW += SIBLING_GAP;
+  // Partition children into LEFT and RIGHT groups. `side === 'left'` lays out
+  // to the left of the parent (the WBS arithmetic `-` marker); everything
+  // else is rendered to the right (the default WBS direction).
+  const leftChildren: TreeNode[] = [];
+  const rightChildren: TreeNode[] = [];
+  for (const c of node.children) {
+    if (c.side === 'left') leftChildren.push(c);
+    else rightChildren.push(c);
   }
-  const childrenMaxH = Math.max(...childLayouts.map((c) => c.height));
+  const leftLayouts = leftChildren.map((c) => layoutNode(c, depth + 1));
+  const rightLayouts = rightChildren.map((c) => layoutNode(c, depth + 1));
+
+  const sumWidths = (ls: WbsLayout[]): number => {
+    let w = 0;
+    for (let i = 0; i < ls.length; i++) {
+      w += ls[i]!.width;
+      if (i < ls.length - 1) w += SIBLING_GAP;
+    }
+    return w;
+  };
+  const leftW = sumWidths(leftLayouts);
+  const rightW = sumWidths(rightLayouts);
+  // Total children row width: left group + gap + right group.
+  // If either side is empty, no extra gap between them.
+  const gapBetween = leftLayouts.length && rightLayouts.length ? SIBLING_GAP : 0;
+  const childrenW = leftW + gapBetween + rightW;
+  const allChildren = [...leftLayouts, ...rightLayouts];
+  const childrenMaxH = allChildren.length ? Math.max(...allChildren.map((c) => c.height)) : 0;
 
   const width = Math.max(boxW, childrenW);
-  const height = boxH + LEVEL_GAP + childrenMaxH;
+  const height = boxH + (allChildren.length ? LEVEL_GAP + childrenMaxH : 0);
   const centerX = width / 2;
 
   return {
@@ -85,7 +111,9 @@ function layoutNode(node: TreeNode, depth: number): WbsLayout {
     draw(x, y) {
       const shapes: Shape[] = [];
       const boxX = x + centerX - boxW / 2;
-      shapes.push(...drawBox(text, boxX, y, boxW, boxH, depth));
+      shapes.push(...drawNode(node, boxX, y, boxW, boxH, depth));
+
+      if (!allChildren.length) return shapes;
 
       const childY = y + boxH + LEVEL_GAP;
       const childrenStartX = x + (width - childrenW) / 2;
@@ -94,7 +122,27 @@ function layoutNode(node: TreeNode, depth: number): WbsLayout {
       const elbowY = (parentBottomY + childY) / 2;
 
       let cursorX = childrenStartX;
-      for (const c of childLayouts) {
+      // Walk left group first (preserves source order within each side).
+      for (const c of leftLayouts) {
+        const childCx = cursorX + c.centerX;
+        shapes.push({
+          type: 'polyline',
+          points: [
+            [parentCx, parentBottomY],
+            [parentCx, elbowY],
+            [childCx, elbowY],
+            [childCx, childY],
+          ],
+          style: { stroke: COLOR_EDGE, strokeWidth: 1, fill: 'none' },
+        });
+        shapes.push(...c.draw(cursorX, childY));
+        cursorX += c.width + SIBLING_GAP;
+      }
+      if (leftLayouts.length && rightLayouts.length) {
+        // Consume the explicit gap between groups (already counted in childrenW).
+        cursorX += gapBetween - SIBLING_GAP;
+      }
+      for (const c of rightLayouts) {
         const childCx = cursorX + c.centerX;
         shapes.push({
           type: 'polyline',
@@ -114,8 +162,28 @@ function layoutNode(node: TreeNode, depth: number): WbsLayout {
   };
 }
 
-function drawBox(text: string, x: number, y: number, w: number, h: number, depth: number): Shape[] {
-  const fill = LEVEL_FILLS[depth % LEVEL_FILLS.length]!;
+function drawNode(
+  node: TreeNode,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  depth: number,
+): Shape[] {
+  if (node.boxless) {
+    return [
+      {
+        type: 'text',
+        x: x + w / 2,
+        y: y + h / 2,
+        text: node.text,
+        anchor: 'middle',
+        baseline: 'middle',
+        font: { family: FONT_FAMILY, size: FONT_SIZE, color: '#000' },
+      },
+    ];
+  }
+  const fill = node.color ?? LEVEL_FILLS[depth % LEVEL_FILLS.length]!;
   return [
     {
       type: 'rect',
@@ -127,7 +195,7 @@ function drawBox(text: string, x: number, y: number, w: number, h: number, depth
       type: 'text',
       x: x + w / 2,
       y: y + h / 2,
-      text,
+      text: node.text,
       anchor: 'middle',
       baseline: 'middle',
       font: { family: FONT_FAMILY, size: FONT_SIZE, color: '#000' },

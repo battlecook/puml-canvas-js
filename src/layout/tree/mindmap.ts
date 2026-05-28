@@ -62,7 +62,7 @@ function layoutNode(node: TreeNode, depth: number): MmLayout {
       height: boxH,
       centerY: boxH / 2,
       draw(x, y) {
-        return drawBox(node.text, x, y, boxW, boxH, depth);
+        return drawBox(node.text, x, y, boxW, boxH, depth, node.color);
       },
     };
   }
@@ -86,7 +86,7 @@ function layoutNode(node: TreeNode, depth: number): MmLayout {
     draw(x, y) {
       const shapes: Shape[] = [];
       const boxY = y + centerY - boxH / 2;
-      shapes.push(...drawBox(node.text, x, boxY, boxW, boxH, depth));
+      shapes.push(...drawBox(node.text, x, boxY, boxW, boxH, depth, node.color));
 
       const childX = x + boxW + LEVEL_GAP;
       const childrenStartY = y + (height - childrenH) / 2;
@@ -115,8 +115,18 @@ function layoutNode(node: TreeNode, depth: number): MmLayout {
   };
 }
 
-function drawBox(text: string, x: number, y: number, w: number, h: number, depth: number): Shape[] {
-  const fill = LEVEL_FILLS[depth % LEVEL_FILLS.length]!;
+function drawBox(
+  text: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  depth: number,
+  color?: string,
+): Shape[] {
+  // Inline `*[#Color] node` override beats the depth-based palette. Pass-through
+  // — accepts any CSS color or hex from the source.
+  const fill = color ?? LEVEL_FILLS[depth % LEVEL_FILLS.length]!;
   const fontSize = depth === 0 ? FONT_ROOT : FONT_SIZE;
   const weight = depth === 0 ? 'bold' : 'normal';
   return [

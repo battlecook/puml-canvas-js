@@ -133,6 +133,107 @@ describe('class parser — members', () => {
     expect(a.hideEmptyMembers).toBe(false);
   });
 
+  it('accepts `$`-prefixed class names', () => {
+    const a = ast('@startuml\nclass $C1\nclass $C2\n@enduml');
+    expect(a.classes.map((c) => c.id)).toEqual(['$C1', '$C2']);
+    expect(a.classes.map((c) => c.name)).toEqual(['$C1', '$C2']);
+  });
+
+  it('tolerates a leading `$tag` token before the class keyword', () => {
+    // PlantUML accepts `$C2 class "$C2" as dollarC2` where `$C2` is a tag-style
+    // decorator; the actual declaration is `class "$C2" as dollarC2`.
+    const a = ast('@startuml\n$C2 class "$C2" as dollarC2\n@enduml');
+    expect(a.classes).toHaveLength(1);
+    expect(a.classes[0]).toMatchObject({ id: 'dollarC2', name: '$C2' });
+  });
+
+  it('drops classes mentioned by `remove <name>`', () => {
+    const a = ast([
+      '@startuml',
+      'class $C1',
+      'class $C2',
+      '$C2 class "$C2" as dollarC2',
+      'remove $C1',
+      'remove $C2',
+      'remove dollarC2',
+      '@enduml',
+    ].join('\n'));
+    expect(a.classes).toHaveLength(0);
+    expect(a.relationships).toHaveLength(0);
+  });
+
+  it('drops relationships involving removed classes', () => {
+    const a = ast([
+      '@startuml',
+      'class A',
+      'class B',
+      'class C',
+      'A --> B',
+      'B --> C',
+      'remove B',
+      '@enduml',
+    ].join('\n'));
+    expect(a.classes.map((c) => c.id)).toEqual(['A', 'C']);
+    expect(a.relationships).toHaveLength(0);
+  });
+
+  it('silently ignores `remove` for names that were never declared', () => {
+    const a = ast('@startuml\nclass A\nremove Ghost\n@enduml');
+    expect(a.classes.map((c) => c.id)).toEqual(['A']);
+  });
+
+  it('captures visibility prefix before the `class` keyword', () => {
+    const a = ast([
+      '@startuml',
+      '-class "private Class" {',
+      '}',
+      '#class "protected Class" {',
+      '}',
+      '~class "package private Class" {',
+      '}',
+      '+class "public Class" {',
+      '}',
+      '@enduml',
+    ].join('\n'));
+    expect(a.classes.map((c) => c.visibility)).toEqual([
+      'private', 'protected', 'package', 'public',
+    ]);
+    expect(a.classes.map((c) => c.name)).toEqual([
+      'private Class', 'protected Class', 'package private Class', 'public Class',
+    ]);
+  });
+
+  it('leaves visibility undefined when no prefix is present', () => {
+    const a = ast('@startuml\nclass A\n@enduml');
+    expect(a.classes[0]!.visibility).toBeUndefined();
+  });
+
+  it('parses inline directional arrows', () => {
+    const a = ast([
+      '@startuml',
+      'foo -left-> dummyLeft',
+      'foo -right-> dummyRight',
+      'foo -up-> dummyUp',
+      'foo -down-> dummyDown',
+      '@enduml',
+    ].join('\n'));
+    expect(a.relationships.map((r) => r.direction)).toEqual([
+      'left', 'right', 'up', 'down',
+    ]);
+  });
+
+  it('reads `left to right direction` and `top to bottom direction`', () => {
+    const lr = ast('@startuml\nleft to right direction\nclass A\n@enduml');
+    expect(lr.direction).toBe('LR');
+    const tb = ast('@startuml\ntop to bottom direction\nclass A\n@enduml');
+    expect(tb.direction).toBe('TB');
+  });
+
+  it('leaves direction undefined by default', () => {
+    const a = ast('@startuml\nclass A\n@enduml');
+    expect(a.direction).toBeUndefined();
+  });
+
   it('parses relationships using non-standard markers as plain-line associations', () => {
     const a = ast(
       [
@@ -158,5 +259,101 @@ describe('class parser — members', () => {
       expect(rel.targetMarker).toBe('none');
       expect(rel.style).toBe('solid');
     }
+  });
+});
+
+describe('class parser — inline extends/implements', () => {
+  it('parses inline `implements` as a realization relation (dashed open triangle)', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'class ArrayList implements List',
+        'class ArrayList extends AbstractList',
+        '@enduml',
+      ].join('\n'),
+    );
+    // One class declared (the second declaration refines the same class id).
+    // Two synthetic relationships: realization from List, inheritance from AbstractList.
+    expect(a.classes.map((c) => c.id)).toEqual(['ArrayList', 'List', 'AbstractList']);
+    expect(a.relationships).toHaveLength(2);
+    const real = a.relationships.find((r) => r.kind === 'realization');
+    const inh = a.relationships.find((r) => r.kind === 'inheritance');
+    expect(real).toMatchObject({
+      source: 'List',
+      target: 'ArrayList',
+      style: 'dashed',
+      sourceMarker: 'triangle',
+    });
+    expect(inh).toMatchObject({
+      source: 'AbstractList',
+      target: 'ArrayList',
+      style: 'solid',
+      sourceMarker: 'triangle',
+    });
+  });
+
+  it('parses comma-separated `extends` list as multiple inheritance relations', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'class A extends B, C {',
+        '}',
+        '@enduml',
+      ].join('\n'),
+    );
+    expect(a.classes.find((c) => c.id === 'A')?.members).toHaveLength(0);
+    expect(a.classes.map((c) => c.id).sort()).toEqual(['A', 'B', 'C']);
+    expect(a.relationships).toHaveLength(2);
+    expect(a.relationships.every((r) => r.kind === 'inheritance')).toBe(true);
+    expect(a.relationships.map((r) => r.source).sort()).toEqual(['B', 'C']);
+    expect(a.relationships.every((r) => r.target === 'A')).toBe(true);
+  });
+});
+
+describe('class parser — inline #style block', () => {
+  it('parses `back:<color>` and `line:<color>` (order arbitrary)', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'class bar #line:green;back:lightblue',
+        'class bar2 #lightblue;line:green',
+        '@enduml',
+      ].join('\n'),
+    );
+    expect(a.classes[0]).toMatchObject({ fill: 'lightblue', borderColor: 'green' });
+    // bare `#lightblue` is treated as `back:` (fill).
+    expect(a.classes[1]).toMatchObject({ fill: 'lightblue', borderColor: 'green' });
+  });
+
+  it('normalizes bare hex colors (no leading #)', () => {
+    const a = ast('@startuml\nclass Foo1 #back:red;line:00FFFF\n@enduml');
+    expect(a.classes[0]).toMatchObject({ fill: 'red', borderColor: '#00FFFF' });
+  });
+
+  it('parses `line.dashed:<color>` and `line.dotted:<color>` and `line.bold`', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'class FooDashed #line.dashed:blue',
+        'class FooDotted #line.dotted:blue',
+        'class FooBold #line.bold',
+        '@enduml',
+      ].join('\n'),
+    );
+    expect(a.classes[0]).toMatchObject({ borderStyle: 'dashed', borderColor: 'blue' });
+    expect(a.classes[1]).toMatchObject({ borderStyle: 'dotted', borderColor: 'blue' });
+    expect(a.classes[2]).toMatchObject({ borderStyle: 'bold' });
+  });
+
+  it('parses gradient `back:c1|c2` and `header:c1/c2`', () => {
+    const a = ast(
+      '@startuml\nclass Demo1 #back:lightgreen|yellow;header:blue/red\n@enduml',
+    );
+    expect(a.classes[0]).toMatchObject({
+      fill: 'lightgreen',
+      fillGradient: ['lightgreen', 'yellow'],
+      headerFill: 'blue',
+      headerGradient: ['blue', 'red'],
+    });
   });
 });

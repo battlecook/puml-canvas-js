@@ -21,6 +21,67 @@ describe('sequence layout', () => {
     expect(polys.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('slants `A ->(N) B` arrows downward and slopes `A (N)<- B` likewise', () => {
+    const src =
+      '@startuml\n' +
+      'A ->(10) B: text 10\n' +
+      'B ->(10) A: text 10\n' +
+      '\n' +
+      'A ->(10) B: text 10\n' +
+      'A (10)<- B: text 10\n' +
+      '@enduml';
+    const scene = compile(src);
+    // Four messages → four arrow polygons (heads).
+    const polys = scene.children.filter((s) => s.type === 'polygon');
+    expect(polys.length).toBeGreaterThanOrEqual(4);
+    // Message lines now have y2 > y1 (slanted). Filter for short-ish lines that
+    // skip the long vertical lifelines. Slanted lines have non-zero |y2 - y1|.
+    const slanted = scene.children.filter(
+      (s) => s.type === 'line' && Math.abs((s as { y1: number; y2: number }).y2 - (s as { y1: number; y2: number }).y1) > 5,
+    );
+    expect(slanted.length).toBeGreaterThanOrEqual(4);
+    // Each label `text 10` should appear four times.
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(texts.filter((t) => t === 'text 10').length).toBe(4);
+  });
+
+  // Regression: combining a slanted arrow with a per-message activation
+  // suffix directly attached to the target (`B++` / `A--`, no whitespace)
+  // used to fail at the parser layer — `B++` was treated as the participant
+  // name and the slope was rendered but the activation never happened.
+  it('slants arrows whose target carries a `++` / `--` suffix without whitespace', () => {
+    const src = '@startuml\nA ->(40) B++: Rq\nB -->(20) A--: Rs\n@enduml';
+    const scene = compile(src);
+    // Slanted arrow body lines: large |x2 - x1| (cross-lane) plus non-zero
+    // |y2 - y1|. Sort by y so we can pair them with the source order.
+    const slanted = scene.children
+      .filter((s) => s.type === 'line')
+      .map((s) => s as { x1: number; x2: number; y1: number; y2: number })
+      .filter((l) => Math.abs(l.x2 - l.x1) > 20 && Math.abs(l.y2 - l.y1) > 5)
+      .sort((a, b) => a.y1 - b.y1);
+    expect(slanted.length).toBeGreaterThanOrEqual(2);
+    // duration=40 → 80px, duration=20 → 40px (DURATION_SCALE = 2).
+    expect(Math.abs(slanted[0]!.y2 - slanted[0]!.y1)).toBe(80);
+    expect(Math.abs(slanted[1]!.y2 - slanted[1]!.y1)).toBe(40);
+  });
+
+  it('keeps plain `A -> B: hi` arrow horizontal (no slant) as a regression', () => {
+    const scene = compile('@startuml\nA -> B: hi\n@enduml');
+    // The arrow's body line should be perfectly horizontal: y1 === y2.
+    const arrowLines = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        Math.abs((s as { x2: number; x1: number }).x2 - (s as { x1: number; x2: number }).x1) > 20,
+    );
+    expect(arrowLines.length).toBeGreaterThanOrEqual(1);
+    for (const line of arrowLines) {
+      const l = line as { y1: number; y2: number };
+      expect(l.y1).toBe(l.y2);
+    }
+  });
+
   it('emits autonumber prefix on message text', () => {
     const scene = compile('@startuml\nautonumber\nA -> B: hi\nA -> B: hello\n@enduml');
     const texts = scene.children.filter((s) => s.type === 'text').map((s) => (s as { text: string }).text);
@@ -34,6 +95,54 @@ describe('sequence layout', () => {
     expect(scene.height).toBeGreaterThan(0);
   });
 
+  it('reorders lanes left-to-right by `participant ... order N` value', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'participant Last order 30',
+        'participant Middle order 20',
+        'participant First order 10',
+        '@enduml',
+      ].join('\n'),
+    );
+    // Header labels are emitted as text shapes — pick the leftmost x for each
+    // (each label appears twice: top + bottom header at the same x).
+    const xByLabel = (label: string): number => {
+      const xs = scene.children
+        .filter((s) => s.type === 'text' && (s as { text: string }).text === label)
+        .map((s) => (s as { x: number }).x);
+      return Math.min(...xs);
+    };
+    const xFirst = xByLabel('First');
+    const xMiddle = xByLabel('Middle');
+    const xLast = xByLabel('Last');
+    // Lanes are sorted ascending by `order` → First (10) < Middle (20) < Last (30).
+    expect(xFirst).toBeLessThan(xMiddle);
+    expect(xMiddle).toBeLessThan(xLast);
+  });
+
+  it('places participants without `order` after those with `order`, preserving declaration order', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'participant Plain1',
+        'participant Sorted order 5',
+        'participant Plain2',
+        '@enduml',
+      ].join('\n'),
+    );
+    const xByLabel = (label: string): number => {
+      const xs = scene.children
+        .filter((s) => s.type === 'text' && (s as { text: string }).text === label)
+        .map((s) => (s as { x: number }).x);
+      return Math.min(...xs);
+    };
+    // `Sorted` has order=5, the others default to +Infinity → `Sorted` first,
+    // then `Plain1` and `Plain2` in declaration order.
+    expect(xByLabel('Sorted')).toBeLessThan(xByLabel('Plain1'));
+    expect(xByLabel('Plain1')).toBeLessThan(xByLabel('Plain2'));
+  });
+
   it('renders actor with stick-figure head colored from the directive', () => {
     const scene = compile('@startuml\nactor Bob #red\nBob -> Bob: x\n@enduml');
     const redCircle = scene.children.find(
@@ -42,6 +151,38 @@ describe('sequence layout', () => {
         (s as { style: { fill?: string } }).style.fill === 'red',
     );
     expect(redCircle).toBeTruthy();
+  });
+
+  it('renders all four colon-shorthand actor declarations as stick figures', () => {
+    const src = [
+      '@startuml',
+      '',
+      ':First Actor:',
+      ':Another\\nactor: as Man2',
+      'actor Woman3',
+      'actor :Last actor: as Person1',
+      '',
+      '@enduml',
+    ].join('\n');
+    const scene = compile(src);
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    // Each actor's label appears twice (top + bottom header).
+    expect(texts.filter((t) => t === 'First Actor').length).toBe(2);
+    expect(texts.filter((t) => t === 'Woman3').length).toBe(2);
+    expect(texts.filter((t) => t === 'Last actor').length).toBe(2);
+    // Multi-line label of Man2 — two lines, each appearing in top + bottom header.
+    expect(texts.filter((t) => t === 'Another').length).toBe(2);
+    expect(texts.filter((t) => t === 'actor').length).toBe(2);
+    // No literal `\n` rendered.
+    expect(texts.some((t) => t.includes('\\n'))).toBe(false);
+    // Each actor renders a 5px-radius head circle, on TOP and BOTTOM headers.
+    // 4 actors × 2 headers = 8 stick-figure heads.
+    const heads = scene.children.filter(
+      (s) => s.type === 'circle' && (s as { r: number }).r === 5,
+    );
+    expect(heads.length).toBe(8);
   });
 
   it('uses participant color as box fill', () => {
@@ -54,6 +195,39 @@ describe('sequence layout', () => {
         (s as { style: { fill?: string } }).style.fill === '#99FF99',
     );
     expect(greenRect).toBeTruthy();
+  });
+
+  it('renders participant stereotypes (plain label and spot-with-label)', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'participant "Famous Bob" as Bob << Generated >>',
+        'participant Alice << (C,#ADD1B2) Testable >>',
+        '',
+        'Bob->Alice: First message',
+        '@enduml',
+      ].join('\n'),
+    );
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    // Bob's display name appears (id 'Bob' is NOT a header label).
+    expect(texts).toContain('Famous Bob');
+    expect(texts).not.toContain('Bob');
+    // Alice's header shows her id (no alias declared).
+    expect(texts).toContain('Alice');
+    // Stereotype labels wrapped in guillemets, italicized by the renderer.
+    expect(texts).toContain('«Generated»');
+    expect(texts).toContain('«Testable»');
+    // Spot character.
+    expect(texts).toContain('C');
+    // Spot circle filled with the directive's color.
+    const greenSpot = scene.children.find(
+      (s) =>
+        s.type === 'circle' &&
+        (s as { style: { fill?: string } }).style.fill === '#ADD1B2',
+    );
+    expect(greenSpot).toBeTruthy();
   });
 
   it('renders multi-line label as multiple text lines in each header', () => {
@@ -199,6 +373,40 @@ describe('sequence layout', () => {
     expect(polylines.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('renders bare `...` between two sequence arrows as a centered dotted line spanning lifelines', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'Bob -> Alice : hello',
+        '...',
+        'Alice -> Bob : ok',
+        '@enduml',
+      ].join('\n'),
+    );
+    // The dotted delay line uses the '2,3' dasharray — distinct from the
+    // lifeline dashes ('4,4') and message dashes ('5,3').
+    const delayLines = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { strokeDasharray?: string } }).style.strokeDasharray === '2,3',
+    );
+    expect(delayLines.length).toBeGreaterThanOrEqual(1);
+    const delay = delayLines[0] as { x1: number; x2: number; y1: number; y2: number };
+    // Horizontal line spanning approximately the full diagram width.
+    expect(delay.y1).toBe(delay.y2);
+    expect(delay.x2 - delay.x1).toBeGreaterThan(scene.width * 0.6);
+    // Sits vertically between the two message-arrow heads.
+    const arrowPolys = scene.children.filter((s) => s.type === 'polygon');
+    expect(arrowPolys.length).toBeGreaterThanOrEqual(2);
+    const arrowYs = arrowPolys
+      .map((p) => (p as { points: Array<[number, number]> }).points.map((pt) => pt[1]))
+      .flat();
+    const minArrowY = Math.min(...arrowYs);
+    const maxArrowY = Math.max(...arrowYs);
+    expect(delay.y1).toBeGreaterThan(minArrowY);
+    expect(delay.y1).toBeLessThan(maxArrowY);
+  });
+
   it('renders `... long delay ...` as a centered dashed annotation', () => {
     const scene = compile(
       [
@@ -316,6 +524,49 @@ describe('sequence layout', () => {
       .filter((s) => s.type === 'text')
       .map((s) => (s as { text: string }).text);
     expect(texts).toContain('partition [p1]');
+  });
+
+  it('renders `alt#Gold #LightBlue ... else #Pink ...` with tab + branch fills', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'Alice -> Bob: Authentication Request',
+        'alt#Gold #LightBlue Successful case',
+        '    Bob -> Alice: Authentication Accepted',
+        'else #Pink Failure',
+        '    Bob -> Alice: Authentication Rejected',
+        'end',
+        '@enduml',
+      ].join('\n'),
+    );
+    const rects = scene.children.filter((s) => s.type === 'rect') as Array<{
+      style?: { fill?: string; stroke?: string };
+    }>;
+    // Branch background rects with resolved colors.
+    const blueRects = rects.filter((r) => r.style?.fill === '#ADD8E6');
+    const pinkRects = rects.filter((r) => r.style?.fill === '#FFC0CB');
+    expect(blueRects.length).toBeGreaterThanOrEqual(1);
+    expect(pinkRects.length).toBeGreaterThanOrEqual(1);
+
+    // Outer group frame: a rect with stroke '#888' and no fill (i.e. 'none').
+    const outerFrame = rects.find(
+      (r) => r.style?.stroke === '#888' && r.style?.fill === 'none',
+    );
+    expect(outerFrame).toBeDefined();
+
+    // Tab polygon filled with the gold-resolved hex.
+    const polys = scene.children.filter((s) => s.type === 'polygon') as Array<{
+      style?: { fill?: string };
+    }>;
+    const goldTab = polys.find((p) => p.style?.fill === '#FFD700');
+    expect(goldTab).toBeDefined();
+
+    // Branch label texts.
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(texts).toContain('alt [Successful case]');
+    expect(texts).toContain('[Failure]');
   });
 
   it('renders `note across` spanning the full diagram width', () => {
@@ -651,6 +902,159 @@ describe('sequence layout', () => {
     expect(texts).toContain('beta');
   });
 
+  it('per-message `++` activates target, auto-declares new lanes, colors bar', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'alice -> bob ++ : hello',
+        'bob -> bob ++ : self call',
+        'bob -> bib ++  #005500 : hello',
+        'bob -> george ** : create',
+        'return done',
+        'return rc',
+        'bob -> george !! : delete',
+        'return success',
+        '@enduml',
+      ].join('\n'),
+    );
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    // Four participants in declared order: alice, bob, bib, george.
+    // alice/bob/bib each have top + bottom header (2 each); george has no
+    // bottom header (destroyed) plus its created-late top header.
+    expect(texts.filter((t) => t === 'alice').length).toBe(2);
+    expect(texts.filter((t) => t === 'bob').length).toBe(2);
+    expect(texts.filter((t) => t === 'bib').length).toBe(2);
+    expect(texts.filter((t) => t === 'george').length).toBe(1);
+    // Arrow labels render
+    expect(texts).toContain('hello');
+    expect(texts).toContain('self call');
+    expect(texts).toContain('create');
+    expect(texts).toContain('done');
+    expect(texts).toContain('rc');
+    expect(texts).toContain('delete');
+    expect(texts).toContain('success');
+
+    // Activation bars: three `++` messages each push a frame. The three
+    // returns each pop one. So at least 3 activation rects render.
+    const actRects = scene.children.filter(
+      (s) =>
+        s.type === 'rect' &&
+        ((s as { style: { fill?: string } }).style.fill === '#ffffff' ||
+          (s as { style: { fill?: string } }).style.fill === '#005500'),
+    );
+    expect(actRects.length).toBeGreaterThanOrEqual(3);
+    // At least one dark-green activation bar (from the `bob -> bib ++ #005500` line).
+    const greenAct = scene.children.find(
+      (s) =>
+        s.type === 'rect' &&
+        (s as { style: { fill?: string } }).style.fill === '#005500',
+    );
+    expect(greenAct).toBeTruthy();
+    // The dark-green arrow line is present too.
+    const greenLine = scene.children.find(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { stroke?: string } }).style.stroke === '#005500',
+    );
+    expect(greenLine).toBeTruthy();
+    // Destroy marker — red X (two crossing strokes) on george.
+    const redLines = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { stroke?: string } }).style.stroke === '#a00',
+    );
+    expect(redLines.length).toBe(2);
+    // Three dashed return arrows — two cross-lane (return done: bib→bob,
+    // return success: bob→alice) drawn as `line` shapes, plus one self-return
+    // (return rc: bob→bob self-call pop) drawn as a `polyline` loop.
+    const dashedLines = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { strokeDasharray?: string } }).style.strokeDasharray === '5,3',
+    );
+    expect(dashedLines.length).toBeGreaterThanOrEqual(2);
+    const dashedPolys = scene.children.filter(
+      (s) =>
+        s.type === 'polyline' &&
+        (s as { style: { strokeDasharray?: string } }).style.strokeDasharray === '5,3',
+    );
+    expect(dashedPolys.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('autoactivate + return + create + destroy: full thread-call diagram', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'autoactivate on',
+        'alice -> bob : hello',
+        'bob -> bob : self call',
+        'bill -> bob #005500 : hello from thread 2',
+        'bob -> george ** : create',
+        'return done in thread 2',
+        'return rc',
+        'bob -> george !! : delete',
+        'return success',
+        '@enduml',
+      ].join('\n'),
+    );
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    // All four participants appear (each twice — top + bottom header — except
+    // george, which is destroyed and has no bottom header, plus a created-late
+    // top header drawn at the message y).
+    expect(texts.filter((t) => t === 'alice').length).toBe(2);
+    expect(texts.filter((t) => t === 'bob').length).toBe(2);
+    expect(texts.filter((t) => t === 'bill').length).toBe(2);
+    expect(texts.filter((t) => t === 'george').length).toBe(1);
+    // Arrow labels render
+    expect(texts).toContain('hello');
+    expect(texts).toContain('self call');
+    expect(texts).toContain('hello from thread 2');
+    expect(texts).toContain('create');
+    expect(texts).toContain('done in thread 2');
+    expect(texts).toContain('rc');
+    expect(texts).toContain('delete');
+    expect(texts).toContain('success');
+    // The `#005500` arrow line is rendered in that color.
+    const greenLine = scene.children.find(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { stroke?: string } }).style.stroke === '#005500',
+    );
+    expect(greenLine).toBeTruthy();
+    // The autoactivate bar created by that message is also dark green.
+    const greenAct = scene.children.find(
+      (s) =>
+        s.type === 'rect' &&
+        (s as { style: { fill?: string } }).style.fill === '#005500',
+    );
+    expect(greenAct).toBeTruthy();
+    // Default autoactivate bars are white.
+    const whiteAct = scene.children.find(
+      (s) =>
+        s.type === 'rect' &&
+        (s as { style: { fill?: string } }).style.fill === '#ffffff',
+    );
+    expect(whiteAct).toBeTruthy();
+    // Destroy marker — red X (two crossing strokes).
+    const redLines = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { stroke?: string; strokeWidth?: number } }).style.stroke === '#a00',
+    );
+    expect(redLines.length).toBe(2);
+    // Return arrows are dashed.
+    const dashedReturns = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { strokeDasharray?: string } }).style.strokeDasharray === '5,3',
+    );
+    expect(dashedReturns.length).toBeGreaterThanOrEqual(3);
+  });
+
   it('renders `participant X [...]` block with sections (bold title + mono + divider)', () => {
     const scene = compile(
       [
@@ -682,5 +1086,521 @@ describe('sequence layout', () => {
         !(l as { style: { strokeDasharray?: string } }).style.strokeDasharray,
     );
     expect(dividers.length).toBeGreaterThan(0);
+  });
+});
+
+describe('sequence layout — found/lost (boundary) messages', () => {
+  const SRC = [
+    '@startuml',
+    '[-> Bob',
+    '[o-> Bob',
+    '[o->o Bob',
+    '[x-> Bob',
+    '',
+    '[<- Bob',
+    '[x<- Bob',
+    '',
+    'Bob ->]',
+    'Bob ->o]',
+    'Bob o->o]',
+    'Bob ->x]',
+    '',
+    'Bob <-]',
+    'Bob x<-]',
+    '@enduml',
+  ].join('\n');
+
+  it('produces a single-lane diagram with Bob and renders all 12 messages', () => {
+    const scene = compile(SRC);
+    // Each message becomes a horizontal line at its own y. With 12 messages
+    // we expect at least 12 message lines (other lines: lifeline, headers).
+    const horizontalLines = scene.children.filter((s) => {
+      if (s.type !== 'line') return false;
+      const ln = s as { y1: number; y2: number };
+      return ln.y1 === ln.y2;
+    });
+    expect(horizontalLines.length).toBeGreaterThanOrEqual(12);
+    // Two header rects for Bob (top + bottom) plus possibly more.
+    const rects = scene.children.filter((s) => s.type === 'rect');
+    expect(rects.length).toBeGreaterThanOrEqual(2);
+    // Bob's label appears in both the top and bottom header.
+    const bobTexts = scene.children
+      .filter((s) => s.type === 'text')
+      .filter((s) => (s as { text: string }).text === 'Bob');
+    expect(bobTexts.length).toBe(2);
+  });
+
+  it('keeps arrow geometry inside the diagram bounds', () => {
+    const scene = compile(SRC);
+    for (const s of scene.children) {
+      if (s.type !== 'line') continue;
+      const ln = s as { x1: number; x2: number };
+      expect(ln.x1).toBeGreaterThanOrEqual(0);
+      expect(ln.x2).toBeGreaterThanOrEqual(0);
+      expect(ln.x1).toBeLessThanOrEqual(scene.width);
+      expect(ln.x2).toBeLessThanOrEqual(scene.width);
+    }
+  });
+
+  it('does not create a phantom `[` or `]` participant', () => {
+    const scene = compile(SRC);
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(texts).not.toContain('[');
+    expect(texts).not.toContain(']');
+  });
+});
+
+describe('sequence layout — short (`?`) boundary messages + markup', () => {
+  const SRC = [
+    '@startuml',
+    '?-> Alice    : ""?->""\\n**short** to actor1',
+    '[-> Alice    : ""[->""\\n**from start** to actor1',
+    '[-> Bob      : ""[->""\\n**from start** to actor2',
+    '?-> Bob      : ""?->""\\n**short** to actor2',
+    'Alice ->]    : ""->]""\\nfrom actor1 **to end**',
+    'Alice ->?    : ""->?""\\n**short** from actor1',
+    'Alice -> Bob : ""->"" \\nfrom actor1 to actor2',
+    '@enduml',
+  ].join('\n');
+
+  it('renders Alice and Bob as the only two participants', () => {
+    const scene = compile(SRC);
+    // Headers draw the participant label as text. Filter Alice/Bob labels.
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(texts.filter((t) => t === 'Alice').length).toBeGreaterThanOrEqual(1);
+    expect(texts.filter((t) => t === 'Bob').length).toBeGreaterThanOrEqual(1);
+    // No phantom `?` participant header text.
+    expect(texts).not.toContain('?');
+  });
+
+  it('renders seven message bodies (one per source line)', () => {
+    const scene = compile(SRC);
+    // Solid (non-dashed) horizontal lines = message bodies. Lifelines are
+    // dashed; headers are vertical/rect edges, not single horizontal lines.
+    const arrows = scene.children.filter((s) => {
+      if (s.type !== 'line') return false;
+      const ln = s as { y1: number; y2: number; style?: { strokeDasharray?: string } };
+      return ln.y1 === ln.y2 && !ln.style?.strokeDasharray;
+    });
+    expect(arrows.length).toBe(7);
+  });
+
+  it('places short-boundary stubs near the participant lane, not at the diagram edges', () => {
+    const scene = compile(SRC);
+    const arrows = (
+      scene.children.filter((s) => {
+        if (s.type !== 'line') return false;
+        const ln = s as { y1: number; y2: number; style?: { strokeDasharray?: string } };
+        return ln.y1 === ln.y2 && !ln.style?.strokeDasharray;
+      }) as Array<{ x1: number; x2: number; y1: number }>
+    ).sort((a, b) => a.y1 - b.y1);
+    // Sorted top-to-bottom matches source order:
+    //   [0] ?-> Alice   (short-left)        — length 36
+    //   [1] [-> Alice   (long-left)         — tail at edge
+    //   [2] [-> Bob     (long-left)
+    //   [3] ?-> Bob     (short-left)        — length 36, between Alice and Bob
+    //   [4] Alice ->]   (long-right)        — head at edge
+    //   [5] Alice ->?   (short-right)       — length 36, between Alice and Bob
+    //   [6] Alice -> Bob
+    const short0 = arrows[0]!;
+    expect(Math.abs(short0.x2 - short0.x1)).toBeCloseTo(36, 0);
+
+    const longLeft = arrows[1]!;
+    // Long boundary's tail sits within a few px of the diagram's left edge.
+    expect(longLeft.x1).toBeLessThan(20);
+
+    const shortToBob = arrows[3]!;
+    expect(Math.abs(shortToBob.x2 - shortToBob.x1)).toBeCloseTo(36, 0);
+    // Short-to-Bob stub sits to the RIGHT of any long-to-left tail (i.e.,
+    // it's in the inter-lane gap, not at the diagram edge).
+    expect(shortToBob.x1).toBeGreaterThan(longLeft.x1 + 20);
+
+    const longRight = arrows[4]!;
+    // Long-right head sits within a few px of the diagram's right edge.
+    expect(longRight.x2).toBeGreaterThan(scene.width - 20);
+
+    const shortOutAlice = arrows[5]!;
+    expect(Math.abs(shortOutAlice.x2 - shortOutAlice.x1)).toBeCloseTo(36, 0);
+    // Short-out from Alice ends well before the diagram's right edge.
+    expect(shortOutAlice.x2).toBeLessThan(scene.width - 40);
+  });
+
+  it('renders monospace `""..""` content (without the quote marks)', () => {
+    const scene = compile(SRC);
+    const monoTexts = scene.children
+      .filter((s) => s.type === 'text')
+      .filter((s) => {
+        const t = s as { font?: { family?: string } };
+        return t.font?.family === 'monospace';
+      })
+      .map((s) => (s as { text: string }).text);
+    // Each label has a monospace head like `?->`, `[->`, `->]`, `->?`, `->`.
+    // The `""` markers must NOT appear in the rendered text.
+    expect(monoTexts).toContain('?->');
+    expect(monoTexts).toContain('[->');
+    expect(monoTexts).toContain('->]');
+    expect(monoTexts).toContain('->?');
+    expect(monoTexts.some((t) => t.includes('""'))).toBe(false);
+  });
+
+  it('renders `**bold**` spans in bold weight', () => {
+    const scene = compile(SRC);
+    const boldShort = scene.children
+      .filter((s) => s.type === 'text')
+      .find((s) => {
+        const t = s as { text: string; font?: { weight?: string } };
+        return t.text === 'short' && t.font?.weight === 'bold';
+      });
+    expect(boldShort).toBeTruthy();
+  });
+});
+
+describe('sequence layout — `box ... end box`', () => {
+  const BOX_SRC = [
+    '@startuml',
+    '',
+    'box "Internal Service" #LightBlue',
+    'participant Bob',
+    'participant Alice',
+    'end box',
+    'participant Other',
+    '',
+    'Bob -> Alice : hello',
+    'Alice -> Other : hello',
+    '',
+    '@enduml',
+  ].join('\n');
+
+  it('renders a LightBlue rectangle wrapping the boxed participants', () => {
+    const scene = compile(BOX_SRC);
+    const boxRect = scene.children.find(
+      (s) =>
+        s.type === 'rect' &&
+        (s as { style?: { fill?: string } }).style?.fill === '#ADD8E6',
+    );
+    expect(boxRect).toBeTruthy();
+  });
+
+  it('renders the box title text "Internal Service" near the top-left of the rect', () => {
+    const scene = compile(BOX_SRC);
+    const titleText = scene.children.find(
+      (s) =>
+        s.type === 'text' &&
+        (s as { text: string }).text === 'Internal Service',
+    );
+    expect(titleText).toBeTruthy();
+    const boxRect = scene.children.find(
+      (s) =>
+        s.type === 'rect' &&
+        (s as { style?: { fill?: string } }).style?.fill === '#ADD8E6',
+    ) as { x: number; y: number; w: number; h: number } | undefined;
+    expect(boxRect).toBeTruthy();
+    const t = titleText as { x: number; y: number };
+    // Title sits inside the box, near its top-left.
+    expect(t.x).toBeGreaterThanOrEqual(boxRect!.x);
+    expect(t.x).toBeLessThan(boxRect!.x + boxRect!.w / 2);
+    expect(t.y).toBeGreaterThanOrEqual(boxRect!.y);
+    expect(t.y).toBeLessThan(boxRect!.y + 40);
+  });
+
+  it('places `Other` outside the box (to the right of its right edge)', () => {
+    const scene = compile(BOX_SRC);
+    const boxRect = scene.children.find(
+      (s) =>
+        s.type === 'rect' &&
+        (s as { style?: { fill?: string } }).style?.fill === '#ADD8E6',
+    ) as { x: number; w: number } | undefined;
+    expect(boxRect).toBeTruthy();
+    const boxRight = boxRect!.x + boxRect!.w;
+    // The Other header text is centered on its lane center; assert that center
+    // is to the right of the box's right edge.
+    const otherTexts = scene.children
+      .filter((s) => s.type === 'text')
+      .filter((s) => (s as { text: string }).text === 'Other') as Array<{ x: number }>;
+    expect(otherTexts.length).toBeGreaterThan(0);
+    for (const t of otherTexts) {
+      expect(t.x).toBeGreaterThan(boxRight);
+    }
+  });
+});
+
+describe('sequence layout — skinparam theming + handwritten notice', () => {
+  // Same fixture as the parser test — exercises background color, arrow color,
+  // participant theme, actor theme, and the handwritten notice.
+  const THEMED_SRC = [
+    '@startuml',
+    'skinparam backgroundColor #EEEBDC',
+    'skinparam handwritten true',
+    '',
+    'skinparam sequence {',
+    'ArrowColor DeepSkyBlue',
+    'ActorBorderColor DeepSkyBlue',
+    'LifeLineBorderColor blue',
+    'LifeLineBackgroundColor #A9DCDF',
+    '',
+    'ParticipantBorderColor DeepSkyBlue',
+    'ParticipantBackgroundColor DodgerBlue',
+    'ParticipantFontName Impact',
+    'ParticipantFontSize 17',
+    'ParticipantFontColor #A9DCDF',
+    '',
+    'ActorBackgroundColor aqua',
+    'ActorFontColor DeepSkyBlue',
+    'ActorFontSize 17',
+    'ActorFontName Aapex',
+    '}',
+    '',
+    'actor User',
+    'participant "First Class" as A',
+    'participant "Second Class" as B',
+    'participant "Last Class" as C',
+    '',
+    'User -> A: DoWork',
+    'activate A',
+    '',
+    'A -> B: Create Request',
+    'activate B',
+    '',
+    'B -> C: DoWork',
+    'activate C',
+    'C --> B: WorkDone',
+    'destroy C',
+    '',
+    'B --> A: Request Created',
+    'deactivate B',
+    '',
+    'A --> User: Done',
+    'deactivate A',
+    '',
+    '@enduml',
+  ].join('\n');
+
+  it('places the background fill rect at the back of the children array', () => {
+    const scene = compile(THEMED_SRC);
+    const first = scene.children[0]!;
+    expect(first.type).toBe('rect');
+    expect((first as { style?: { fill?: string } }).style?.fill).toBe('#EEEBDC');
+    // It covers the whole canvas — width matches scene.width.
+    const r = first as { x: number; y: number; w: number; h: number };
+    expect(r.x).toBe(0);
+    expect(r.y).toBe(0);
+    expect(r.w).toBe(scene.width);
+    expect(scene.background).toBe('#EEEBDC');
+  });
+
+  it('applies DodgerBlue fill to participant header rectangles', () => {
+    const scene = compile(THEMED_SRC);
+    const fills = scene.children
+      .filter((s) => s.type === 'rect')
+      .map((s) => (s as { style?: { fill?: string } }).style?.fill);
+    // DodgerBlue resolves to its CSS hex.
+    expect(fills).toContain('#1E90FF');
+  });
+
+  it('strokes arrow lines with DeepSkyBlue from ArrowColor', () => {
+    const scene = compile(THEMED_SRC);
+    const lineStrokes = scene.children
+      .filter((s) => s.type === 'line')
+      .map((s) => (s as { style?: { stroke?: string } }).style?.stroke);
+    // DeepSkyBlue → #00BFFF. At least one arrow line uses it.
+    expect(lineStrokes).toContain('#00BFFF');
+  });
+
+  it('emits the handwritten notice text', () => {
+    const scene = compile(THEMED_SRC);
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    const notice = texts.find((t) => t.includes("!option handwritten true"));
+    expect(notice).toBeDefined();
+  });
+
+  it('skips the handwritten notice when no skinparam handwritten directive', () => {
+    const scene = compile('@startuml\nA -> B: hi\n@enduml');
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    const notice = texts.find((t) => t.includes('!option handwritten'));
+    expect(notice).toBeUndefined();
+  });
+});
+
+describe('sequence layout — `<style>` blocks', () => {
+  const STYLE_SRC = [
+    '@startuml',
+    '<style>',
+    'lifeLine {',
+    '  LineStyle 0',
+    '}',
+    'delay {',
+    '  LineStyle 1-4',
+    '}',
+    '</style>',
+    'Alice -> Bob : hello',
+    '...',
+    'Alice <- Bob : hello',
+    '@enduml',
+  ].join('\n');
+
+  it('renders lifelines as solid lines when `lifeLine { LineStyle 0 }`', () => {
+    const scene = compile(STYLE_SRC);
+    // Lifelines stroke COLOR_LIFELINE (#666). Default would be dasharray '4,4';
+    // LineStyle 0 means solid → no dasharray attribute at all.
+    const lifelines = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { stroke?: string } }).style.stroke === '#666',
+    );
+    expect(lifelines.length).toBeGreaterThanOrEqual(2);
+    for (const ll of lifelines) {
+      const dash = (ll as { style: { strokeDasharray?: string } }).style.strokeDasharray;
+      expect(dash).toBeUndefined();
+    }
+  });
+
+  it('renders the `...` delay line with the configured `1,4` dasharray', () => {
+    const scene = compile(STYLE_SRC);
+    const delayLines = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { strokeDasharray?: string } }).style.strokeDasharray === '1,4',
+    );
+    expect(delayLines.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('regression: without a style block, lifeline dasharray stays at default `4,4`', () => {
+    const scene = compile('@startuml\nAlice -> Bob : hi\n@enduml');
+    const lifelines = scene.children.filter(
+      (s) =>
+        s.type === 'line' &&
+        (s as { style: { stroke?: string } }).style.stroke === '#666',
+    );
+    expect(lifelines.length).toBeGreaterThanOrEqual(2);
+    for (const ll of lifelines) {
+      const dash = (ll as { style: { strokeDasharray?: string } }).style.strokeDasharray;
+      expect(dash).toBe('4,4');
+    }
+  });
+});
+
+describe('sequence layout — `hide unlinked`', () => {
+  const HIDE_SRC = [
+    '@startuml',
+    'hide unlinked',
+    'participant Alice',
+    'participant Bob',
+    'participant Carol',
+    '',
+    'Alice -> Bob : hello',
+    '@enduml',
+  ].join('\n');
+
+  it('omits unreferenced participants from the rendered scene', () => {
+    const scene = compile(HIDE_SRC);
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(texts).toContain('Alice');
+    expect(texts).toContain('Bob');
+    expect(texts).not.toContain('Carol');
+  });
+
+  it('shrinks the diagram width when an unreferenced trailing participant is hidden', () => {
+    const sceneAll = compile(HIDE_SRC.replace('hide unlinked\n', ''));
+    const sceneHide = compile(HIDE_SRC);
+    expect(sceneHide.width).toBeLessThan(sceneAll.width);
+  });
+
+  it('removes a box entirely when all its members are unlinked', () => {
+    const src = [
+      '@startuml',
+      'hide unlinked',
+      'box "Internal" #LightBlue',
+      'participant Ghost1',
+      'participant Ghost2',
+      'end box',
+      'participant Alice',
+      'participant Bob',
+      '',
+      'Alice -> Bob : hello',
+      '@enduml',
+    ].join('\n');
+    const scene = compile(src);
+    // The LightBlue box rect is gone because no surviving lane carries its id.
+    const boxRect = scene.children.find(
+      (s) =>
+        s.type === 'rect' &&
+        (s as { style?: { fill?: string } }).style?.fill === '#ADD8E6',
+    );
+    expect(boxRect).toBeUndefined();
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(texts).not.toContain('Ghost1');
+    expect(texts).not.toContain('Ghost2');
+    expect(texts).not.toContain('Internal');
+    expect(texts).toContain('Alice');
+    expect(texts).toContain('Bob');
+  });
+});
+
+describe('sequence layout — `mainframe`', () => {
+  it('renders an outer unfilled rect, a folded tab, and bold label text', () => {
+    const scene = compile(
+      '@startuml\nmainframe This is a **mainframe**\nAlice->Bob : Hello\n@enduml',
+    );
+
+    // 1) An outer rect with no fill spanning (nearly) the full diagram.
+    const outerRects = scene.children.filter((s) => {
+      if (s.type !== 'rect') return false;
+      const r = s as { x: number; y: number; w: number; h: number; style?: { fill?: string } };
+      return r.style?.fill === 'none' && r.w >= scene.width - 12 && r.h >= scene.height - 12;
+    });
+    expect(outerRects.length).toBeGreaterThanOrEqual(1);
+
+    // 2) A polygon shape forming the folded tab (5 points: rect + corner fold).
+    const tabPolygons = scene.children.filter((s) => {
+      if (s.type !== 'polygon') return false;
+      const p = s as { points: Array<[number, number]> };
+      // Mainframe tab anchors at the very top-left corner (within FRAME_PAD).
+      return p.points.length === 5 && p.points[0]![0] < 10 && p.points[0]![1] < 10;
+    });
+    expect(tabPolygons.length).toBeGreaterThanOrEqual(1);
+
+    // 3) A text shape `mainframe` rendered with bold weight (the **…** span).
+    const boldMainframe = scene.children.find(
+      (s) =>
+        s.type === 'text' &&
+        (s as { text: string }).text === 'mainframe' &&
+        (s as { font?: { weight?: string } }).font?.weight === 'bold',
+    );
+    expect(boldMainframe).toBeDefined();
+
+    // 4) Alice / Bob participants sit BELOW the tab's bottom edge.
+    const tabBottomY = (tabPolygons[0] as { points: Array<[number, number]> }).points[3]![1];
+    const aliceText = scene.children.find(
+      (s) => s.type === 'text' && (s as { text: string }).text === 'Alice',
+    );
+    const bobText = scene.children.find(
+      (s) => s.type === 'text' && (s as { text: string }).text === 'Bob',
+    );
+    expect(aliceText).toBeDefined();
+    expect(bobText).toBeDefined();
+    expect((aliceText as { y: number }).y).toBeGreaterThan(tabBottomY);
+    expect((bobText as { y: number }).y).toBeGreaterThan(tabBottomY);
+  });
+
+  it('does not emit a mainframe rect when the directive is absent', () => {
+    const scene = compile('@startuml\nAlice->Bob : Hello\n@enduml');
+    const outerRects = scene.children.filter((s) => {
+      if (s.type !== 'rect') return false;
+      const r = s as { w: number; h: number; style?: { fill?: string } };
+      return r.style?.fill === 'none' && r.w >= scene.width - 12 && r.h >= scene.height - 12;
+    });
+    expect(outerRects.length).toBe(0);
   });
 });

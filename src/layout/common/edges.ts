@@ -68,9 +68,9 @@ export function drawLayeredEdge(
 
   const shapes: Shape[] = [makeLine(shortened, lineStyle)];
 
-  const startMarkerShape = drawMarker(startMarker, original[0]!, original[1]!);
+  const startMarkerShape = drawMarker(startMarker, original[0]!, original[1]!, style.markerColor);
   if (startMarkerShape) shapes.push(startMarkerShape);
-  const endMarkerShape = drawMarker(endMarker, original[original.length - 1]!, original[original.length - 2]!);
+  const endMarkerShape = drawMarker(endMarker, original[original.length - 1]!, original[original.length - 2]!, style.markerColor);
   if (endMarkerShape) shapes.push(endMarkerShape);
 
   const pointsArr: Array<[number, number]> = original.map((v) => [v.x, v.y]);
@@ -143,9 +143,9 @@ export function drawLayeredSelfLoop(
 
   const shapes: Shape[] = [makeLine(shortened, lineStyle)];
 
-  const startMarkerShape = drawMarker(rel.sourceMarker, original[0]!, original[1]!);
+  const startMarkerShape = drawMarker(rel.sourceMarker, original[0]!, original[1]!, style.markerColor);
   if (startMarkerShape) shapes.push(startMarkerShape);
-  const endMarkerShape = drawMarker(rel.targetMarker, original[3]!, original[2]!);
+  const endMarkerShape = drawMarker(rel.targetMarker, original[3]!, original[2]!, style.markerColor);
   if (endMarkerShape) shapes.push(endMarkerShape);
 
   if (rel.label) {

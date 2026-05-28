@@ -28,6 +28,15 @@ const COLOR_NULL = '#999';
 
 type Primitive = string | number | boolean | null;
 
+/** Visual overrides applied to a highlighted row. Sourced from a `<style>`
+ * class (`<<className>>`) or defaulted to the plain green fill. */
+interface HighlightStyle {
+  fill?: string;
+  fontColor?: string;
+  fontWeight?: 'normal' | 'bold';
+  fontStyle?: 'normal' | 'italic';
+}
+
 interface Row {
   key: string;
   isPrimitive: boolean;
@@ -35,6 +44,7 @@ interface Row {
   primitiveColor: string;
   childId: string;
   highlighted: boolean;
+  highlightStyle?: HighlightStyle;
 }
 
 interface NodeBox {
@@ -64,17 +74,57 @@ export function layoutJson(ast: JsonAst): Scene {
     title: ast.title,
     data: ast.data,
     highlights: ast.highlights,
+    highlightClassNames: ast.highlightClassNames,
+    classStyles: ast.styles,
     parseError: ast.parseError,
     errorLabel: 'JSON parse error',
   });
+}
+
+export interface KvNodeStyle {
+  fill?: string;
+  stroke?: string;
+  strokeWidth?: number;
+  strokeDasharray?: string;
+  rx?: number;
+  ry?: number;
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: 'normal' | 'bold';
+  fontColor?: string;
+}
+
+export interface KvEdgeStyle {
+  stroke?: string;
+  strokeWidth?: number;
+  strokeDasharray?: string;
+}
+
+export interface KvSeparatorStyle {
+  stroke?: string;
+  strokeWidth?: number;
+  strokeDasharray?: string;
+}
+
+export interface KvStyling {
+  node?: KvNodeStyle;
+  arrow?: KvEdgeStyle;
+  separator?: KvSeparatorStyle;
 }
 
 export interface KvTreeInput {
   title: string;
   data: unknown;
   highlights: string[][];
+  /** Optional parallel array of class names referenced by each highlight (e.g.
+   * `<<h1>>` after the path). Length should match `highlights` when supplied. */
+  highlightClassNames?: Array<string | undefined>;
+  /** CSS-like class table from a `<style>` block: className -> property map
+   * (property keys lowercased). Used to resolve `<<className>>` references. */
+  classStyles?: Record<string, Record<string, string>>;
   parseError: string;
   errorLabel: string;
+  styling?: KvStyling;
 }
 
 export function layoutKvTree(ast: KvTreeInput): Scene {
@@ -82,8 +132,18 @@ export function layoutKvTree(ast: KvTreeInput): Scene {
     return errorScene(ast.parseError, ast.errorLabel);
   }
 
-  const highlightSet = new Set(ast.highlights.map((p) => p.join('')));
-  const graph = buildGraph(ast.data, highlightSet);
+  // Resolve `<style>` class properties into per-row visual overrides. Key
+  // strings mirror `path.join('')` for backwards-compat with prior matching.
+  const highlightStyleMap = new Map<string, HighlightStyle>();
+  for (let i = 0; i < ast.highlights.length; i++) {
+    const path = ast.highlights[i]!;
+    const key = path.join('');
+    const className = ast.highlightClassNames?.[i];
+    const props = className ? ast.classStyles?.[className] : undefined;
+    highlightStyleMap.set(key, resolveHighlightStyle(props));
+  }
+  const highlightSet = new Set(highlightStyleMap.keys());
+  const graph = buildGraph(ast.data, highlightSet, highlightStyleMap);
 
   if (graph.nodes.length === 0) {
     return scalarOnly(ast);
@@ -140,6 +200,7 @@ export function layoutKvTree(ast: KvTreeInput): Scene {
   }
 
   // Draw edges first so node fills cover them at endpoints
+  const arrowStyle = ast.styling?.arrow;
   for (const edge of graph.edges) {
     const fromPos = positions.get(edge.fromId);
     const toPos = positions.get(edge.toId);
@@ -155,14 +216,18 @@ export function layoutKvTree(ast: KvTreeInput): Scene {
       y1: dotY,
       x2: targetX,
       y2: targetY,
-      style: { stroke: COLOR_EDGE, strokeWidth: 1, strokeDasharray: '4,3' },
+      style: {
+        stroke: arrowStyle?.stroke ?? COLOR_EDGE,
+        strokeWidth: arrowStyle?.strokeWidth ?? 1,
+        strokeDasharray: arrowStyle?.strokeDasharray ?? '4,3',
+      },
     });
   }
 
   // Draw nodes
   for (const node of graph.nodes) {
     const pos = positions.get(node.id)!;
-    shapes.push(...drawNode(node, pos.x, pos.y));
+    shapes.push(...drawNode(node, pos.x, pos.y, ast.styling));
   }
 
   return {
@@ -173,7 +238,11 @@ export function layoutKvTree(ast: KvTreeInput): Scene {
   };
 }
 
-function buildGraph(data: unknown, highlights: Set<string>): Graph {
+function buildGraph(
+  data: unknown,
+  highlights: Set<string>,
+  highlightStyles: Map<string, HighlightStyle>,
+): Graph {
   const nodes: NodeBox[] = [];
   const edges: Edge[] = [];
   const depth = new Map<string, number>();
@@ -193,27 +262,31 @@ function buildGraph(data: unknown, highlights: Set<string>): Graph {
 
     const rows: Row[] = entries.map(([key, v]) => {
       const childPath = [...path, key];
-      const pathKey = childPath.join('');
+      const pathKey = childPath.join('');
       const highlighted = highlights.has(pathKey);
-      if (isComposite(v)) {
-        return {
-          key,
-          isPrimitive: false,
-          primitiveText: '',
-          primitiveColor: '',
-          childId: '',
-          highlighted,
-        };
-      }
-      const formatted = formatPrimitive(v as Primitive);
-      return {
-        key,
-        isPrimitive: true,
-        primitiveText: formatted.text,
-        primitiveColor: formatted.color,
-        childId: '',
-        highlighted,
-      };
+      const hs = highlighted ? highlightStyles.get(pathKey) : undefined;
+      const base: Row = isComposite(v)
+        ? {
+            key,
+            isPrimitive: false,
+            primitiveText: '',
+            primitiveColor: '',
+            childId: '',
+            highlighted,
+          }
+        : (() => {
+            const formatted = formatPrimitive(v as Primitive);
+            return {
+              key,
+              isPrimitive: true,
+              primitiveText: formatted.text,
+              primitiveColor: formatted.color,
+              childId: '',
+              highlighted,
+            };
+          })();
+      if (hs) base.highlightStyle = hs;
+      return base;
     });
 
     // Measure
@@ -256,22 +329,134 @@ function buildGraph(data: unknown, highlights: Set<string>): Graph {
   return { nodes, rootId, edges, depth, isArray };
 }
 
-function drawNode(node: NodeBox, x: number, y: number): Shape[] {
+function drawNode(node: NodeBox, x: number, y: number, styling?: KvStyling): Shape[] {
   const shapes: Shape[] = [];
   const w = node.keyW + node.valW;
+  const totalH = node.rows.length * node.rowH;
+  const ns = styling?.node;
+  const sepS = styling?.separator;
+
+  const nodeStroke = ns?.stroke ?? COLOR_LINE;
+  const nodeStrokeWidth = ns?.strokeWidth ?? 1;
+  const nodeDash = ns?.strokeDasharray;
+  const nodeFill = ns?.fill;
+  const keyFill = nodeFill ?? COLOR_KEY_FILL;
+  const valueDefaultFill = nodeFill ?? COLOR_CELL_FILL;
+  const rx = ns?.rx;
+  const ry = ns?.ry;
+  const textFamily = ns?.fontFamily ?? FONT_FAMILY;
+  const textSize = ns?.fontSize ?? KEY_FONT;
+  const textWeight = ns?.fontWeight ?? 'bold';
+  const textColor = ns?.fontColor ?? '#000';
+  const valueFamily = ns?.fontFamily ?? FONT_FAMILY;
+  const valueSize = ns?.fontSize ?? VALUE_FONT;
+  // When the node font color is explicit, use it for primitive values too
+  // (overriding the per-type syntax color).
+  const valueColorOverride = ns?.fontColor;
+
+  // When the user supplies a node style, render the box as one outlined rect
+  // covering all rows, then draw row separators using the separator style.
+  // Otherwise keep the per-cell rect grid for backwards compatibility.
+  const styled = ns !== undefined;
+
+  if (styled) {
+    const outerRect: Shape = {
+      type: 'rect',
+      x,
+      y,
+      w,
+      h: totalH,
+      style: {
+        fill: nodeFill ?? COLOR_CELL_FILL,
+        stroke: nodeStroke,
+        strokeWidth: nodeStrokeWidth,
+        ...(nodeDash ? { strokeDasharray: nodeDash } : {}),
+      },
+    };
+    if (rx !== undefined) (outerRect as { rx?: number }).rx = rx;
+    if (ry !== undefined) (outerRect as { ry?: number }).ry = ry;
+    shapes.push(outerRect);
+  }
+
   for (let i = 0; i < node.rows.length; i++) {
     const row = node.rows[i]!;
     const rowY = y + i * node.rowH;
-    const valueFill = row.highlighted ? COLOR_HIGHLIGHT : COLOR_CELL_FILL;
-    // Key cell
-    shapes.push({
-      type: 'rect',
-      x,
-      y: rowY,
-      w: node.keyW,
-      h: node.rowH,
-      style: { fill: COLOR_KEY_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
-    });
+    // Per-row highlight: explicit class fill > default highlight color.
+    const hi = row.highlightStyle;
+    const highlightFill = row.highlighted
+      ? (hi?.fill ?? COLOR_HIGHLIGHT)
+      : valueDefaultFill;
+
+    if (!styled) {
+      // Preserve the original shape ordering: key-rect, key-text, value-rect, value-text/dot.
+      shapes.push({
+        type: 'rect',
+        x,
+        y: rowY,
+        w: node.keyW,
+        h: node.rowH,
+        style: { fill: keyFill, stroke: nodeStroke, strokeWidth: nodeStrokeWidth },
+      });
+      shapes.push({
+        type: 'text',
+        x: x + ROW_PAD_X,
+        y: rowY + node.rowH / 2,
+        text: row.key,
+        anchor: 'start',
+        baseline: 'middle',
+        font: { family: textFamily, size: textSize, weight: textWeight, color: textColor },
+      });
+      shapes.push({
+        type: 'rect',
+        x: x + node.keyW,
+        y: rowY,
+        w: node.valW,
+        h: node.rowH,
+        style: { fill: highlightFill, stroke: nodeStroke, strokeWidth: nodeStrokeWidth },
+      });
+      if (row.isPrimitive) {
+        const valueColor = hi?.fontColor ?? row.primitiveColor;
+        const font: { family: string; size: number; weight?: 'bold' | 'normal'; style?: 'italic' | 'normal'; color: string } = {
+          family: valueFamily,
+          size: valueSize,
+          color: valueColor,
+        };
+        if (hi?.fontWeight) font.weight = hi.fontWeight;
+        if (hi?.fontStyle) font.style = hi.fontStyle;
+        shapes.push({
+          type: 'text',
+          x: x + node.keyW + ROW_PAD_X,
+          y: rowY + node.rowH / 2,
+          text: row.primitiveText,
+          anchor: 'start',
+          baseline: 'middle',
+          font,
+        });
+      } else {
+        const dotX = x + w - ROW_PAD_X;
+        const dotY = rowY + node.rowH / 2;
+        shapes.push({
+          type: 'circle',
+          cx: dotX,
+          cy: dotY,
+          r: CONNECTOR_R,
+          style: { fill: COLOR_DOT, stroke: COLOR_DOT, strokeWidth: 1 },
+        });
+      }
+      continue;
+    }
+
+    // Styled path: outer rect drawn above; per-row only overlays + text.
+    if (row.highlighted) {
+      shapes.push({
+        type: 'rect',
+        x: x + node.keyW,
+        y: rowY,
+        w: node.valW,
+        h: node.rowH,
+        style: { fill: highlightFill },
+      });
+    }
     shapes.push({
       type: 'text',
       x: x + ROW_PAD_X,
@@ -279,18 +464,20 @@ function drawNode(node: NodeBox, x: number, y: number): Shape[] {
       text: row.key,
       anchor: 'start',
       baseline: 'middle',
-      font: { family: FONT_FAMILY, size: KEY_FONT, weight: 'bold', color: '#000' },
-    });
-    // Value cell
-    shapes.push({
-      type: 'rect',
-      x: x + node.keyW,
-      y: rowY,
-      w: node.valW,
-      h: node.rowH,
-      style: { fill: valueFill, stroke: COLOR_LINE, strokeWidth: 1 },
+      font: { family: textFamily, size: textSize, weight: textWeight, color: textColor },
     });
     if (row.isPrimitive) {
+      const valueColor = hi?.fontColor ?? valueColorOverride ?? row.primitiveColor;
+      const weight: 'bold' | undefined =
+        hi?.fontWeight === 'bold' ? 'bold' : textWeight === 'bold' ? 'bold' : undefined;
+      const styleField: 'italic' | undefined = hi?.fontStyle === 'italic' ? 'italic' : undefined;
+      const font: { family: string; size: number; weight?: 'bold' | 'normal'; style?: 'italic' | 'normal'; color: string } = {
+        family: valueFamily,
+        size: valueSize,
+        color: valueColor,
+      };
+      if (weight) font.weight = weight;
+      if (styleField) font.style = styleField;
       shapes.push({
         type: 'text',
         x: x + node.keyW + ROW_PAD_X,
@@ -298,10 +485,9 @@ function drawNode(node: NodeBox, x: number, y: number): Shape[] {
         text: row.primitiveText,
         anchor: 'start',
         baseline: 'middle',
-        font: { family: FONT_FAMILY, size: VALUE_FONT, color: row.primitiveColor },
+        font,
       });
     } else {
-      // Connector dot at right edge of value cell
       const dotX = x + w - ROW_PAD_X;
       const dotY = rowY + node.rowH / 2;
       shapes.push({
@@ -312,8 +498,69 @@ function drawNode(node: NodeBox, x: number, y: number): Shape[] {
         style: { fill: COLOR_DOT, stroke: COLOR_DOT, strokeWidth: 1 },
       });
     }
+
+    if (i > 0) {
+      shapes.push({
+        type: 'line',
+        x1: x,
+        y1: rowY,
+        x2: x + w,
+        y2: rowY,
+        style: {
+          stroke: sepS?.stroke ?? nodeStroke,
+          strokeWidth: sepS?.strokeWidth ?? Math.max(0.5, nodeStrokeWidth / 2),
+          ...(sepS?.strokeDasharray ? { strokeDasharray: sepS.strokeDasharray } : {}),
+        },
+      });
+    }
   }
+
+  // Inner divider between key and value column (styled mode only).
+  if (styled) {
+    shapes.push({
+      type: 'line',
+      x1: x + node.keyW,
+      y1: y,
+      x2: x + node.keyW,
+      y2: y + totalH,
+      style: {
+        stroke: sepS?.stroke ?? nodeStroke,
+        strokeWidth: sepS?.strokeWidth ?? Math.max(0.5, nodeStrokeWidth / 2),
+        ...(sepS?.strokeDasharray ? { strokeDasharray: sepS.strokeDasharray } : {}),
+      },
+    });
+  }
+
   return shapes;
+}
+
+/** Convert a class property map (lowercased keys) into a `HighlightStyle`.
+ * Supports `BackGroundColor`, `FontColor`, and `FontStyle` (italic|bold or
+ * `italic bold` combined). Other props are ignored. Returns `{}` when no
+ * class is set (caller still treats the row as highlighted via default fill). */
+function resolveHighlightStyle(
+  props: Record<string, string> | undefined,
+): HighlightStyle {
+  if (!props) return {};
+  const out: HighlightStyle = {};
+  const bg = props['backgroundcolor'];
+  if (bg) out.fill = normalizeColor(bg);
+  const fc = props['fontcolor'];
+  if (fc) out.fontColor = normalizeColor(fc);
+  const fs = props['fontstyle'];
+  if (fs) {
+    const lc = fs.toLowerCase();
+    if (lc.includes('italic')) out.fontStyle = 'italic';
+    if (lc.includes('bold')) out.fontWeight = 'bold';
+  }
+  return out;
+}
+
+/** Pass-through for named CSS colors (browsers render `green`, `red`, etc.
+ * natively) and hex codes. We don't translate names here so the SVG renderer
+ * can use them verbatim. */
+function normalizeColor(raw: string): string {
+  return raw;
 }
 
 function formatPrimitive(v: Primitive): { text: string; color: string } {

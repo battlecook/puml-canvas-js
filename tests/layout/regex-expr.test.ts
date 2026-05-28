@@ -99,4 +99,19 @@ describe('regex expression parser', () => {
     const e = parseRegexPattern('(unclosed');
     expect(e).not.toBeNull();
   });
+
+  it('parses \\Q...\\E as a single literal sequence', () => {
+    expect(parseRegexPattern('\\Qfoo\\E')).toEqual({ type: 'literal', value: 'foo' });
+  });
+
+  it('treats regex metacharacters inside \\Q...\\E as literal', () => {
+    expect(parseRegexPattern('\\Qa.b*c|d\\E')).toEqual({
+      type: 'literal',
+      value: 'a.b*c|d',
+    });
+  });
+
+  it('handles unterminated \\Q by consuming to end of input', () => {
+    expect(parseRegexPattern('\\Qfoo')).toEqual({ type: 'literal', value: 'foo' });
+  });
 });

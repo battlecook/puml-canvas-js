@@ -8,6 +8,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The project is pre-1.0. While the public API is stable across patch releases,
 > minor releases (0.X.0) may introduce breaking changes until 1.0.0.
 
+## [0.6.0] - 2026-05-29
+
+### Added
+
+- **Demo sample gallery.** The demo was rebuilt from a single editor/preview
+  page into a sidebar-driven gallery with per-kind example cards and dedicated
+  sample modules for sequence, use case, class, activity, component,
+  deployment, object, state, timing, regex, Gantt, mindmap, WBS, EBNF, JSON,
+  YAML, and placeholder-oriented Network/Wireframe/Archimate examples.
+- **Shared `skinparam` extraction and handwritten notices.** Sequence and use
+  case parsers now collect one-line and block `skinparam` directives into AST
+  skin maps. Layouts apply supported color/font tokens and render the
+  PlantUML-style handwritten warning notice for `skinparam handwritten true`.
+- **Sequence compatibility sweep.** Added support for participant `order`,
+  colon actor shorthand (`:Actor:`), participant stereotypes/spots,
+  `box ... end box`, slanted duration arrows (`->(N)` / `(N)<-`), per-message
+  activation/deactivation suffixes (`++`, `--`, `++--`, `--++`), `autoactivate`,
+  `return`, create/destroy markers, found/lost boundary messages (`[->`,
+  `->]`, `?->`, `->?`), `mainframe`, `hide unlinked`, colored `alt` / `else`
+  branches, and `<style>` `LineStyle` handling for lifelines, arrows, delays,
+  and participant boxes.
+- **Extended markup rendering.** Sequence/activity label markup now supports
+  `<U+XXXX>`, OpenIconic/emoji placeholders, `<img:...>` placeholders,
+  `<font:...>`, `<color:...>`, `<back:...>`, `<size:...>`, colored underline /
+  strike / wave tags, and Creole escaping such as `~__not underlined__`.
+- **Use case compatibility sweep.** Added richer declarations and layout for
+  aliased shorthand use cases, actor/use case stereotypes, business actors and
+  business use cases (`/` shorthand), free-standing and attached notes,
+  reverse arrow normalization, bare-id actor endpoints, paren use case
+  endpoints, single-dot dashed arrows, inline direction hints, `left to right`
+  / `top to bottom` direction, actorStyle variants, and skinparam stereotype
+  overrides.
+- **Class diagram compatibility sweep.** Added `$`-prefixed class names,
+  leading `$tag` tolerance, `remove` directives, declaration visibility
+  prefixes, `left to right` / `top to bottom` direction, inline directional
+  arrows, inline `extends` / `implements`, comma-separated inheritance lists,
+  and inline `#` style blocks for fill, border, line style, header fill, and
+  gradients.
+- **Container/object/deployment coverage.** Component diagrams now parse
+  `() "Name"` interface shorthand, bracket display names, inline colors, and
+  multi-line bracket labels. Deployment/container diagrams now cover additional
+  shape keywords (`agent`, `card`, `file`, `hexagon`, `process`, `stack`,
+  `package`, `action`, `usecase`, `map`) plus inline style fields and deeper
+  arbitrary nesting. Object diagrams now support `map Name { key => value }`
+  nodes and literal angle-bracket display names.
+- **Activity, Gantt, JSON/YAML, state, and tree extensions.** Activity diagrams
+  support `*` bullet shorthand with nested bullet children and style blocks.
+  Gantt parsing/layout now handles explicit starts/ends, compound
+  day/week durations, sections, and ordinal day axes when no project start
+  date exists. JSON/YAML support `<style>` class/highlight styling. State nodes
+  accept inline style suffixes, while mindmap/WBS nodes support Markdown-style
+  headings, arithmetic notation, boxless WBS nodes, side hints, and inline
+  colors.
+
+### Changed
+
+- **Diagram detection is broader and less collision-prone.** Detection now
+  recognizes found/lost sequence boundary messages, sequence delay lines,
+  colon-actor shorthand, use-case paren and business markers, component
+  `()` interface shorthand, `*`/`-` activity bullet shortcuts, additional
+  deployment shape keywords, and object `map` blocks while avoiding known
+  class/sequence/activity false positives.
+- **Layered layouts gained direction and style awareness.** Class and use case
+  layout can swap between TB and LR flow, use inline direction hints for
+  satellite placement, and propagate richer edge/node styling through shared
+  edge drawing.
+- **JSON/YAML key-value layout styling was generalized.** Highlighted rows can
+  now use named style classes with custom value-cell background, font color,
+  weight, and style instead of only the default highlight fill.
+
+### Fixed
+
+- **Sequence lane and annotation bounds.** Hidden unlinked participants,
+  participant boxes, boundary messages, short boundary stubs, slanted arrows,
+  mainframe borders, and styled group/delay surfaces now render without
+  creating phantom participants or clipping geometry.
+- **Use case rendering regressions.** Multi-line use case labels with
+  separators render as rounded blocks while single-line use cases remain
+  ellipses; note connectors are dashed; reverse arrows and aliased use cases
+  normalize to the intended source/target.
+- **Nested container routing and rendering.** Deep nesting, parallel nested
+  edges, shape-specific rendering, footer markup, and multi-line labels are
+  covered for component/deployment/object diagrams.
+
+### Tests
+
+- Test suite grew from 375 → 622 cases. New coverage spans sequence
+  compatibility features, use case skin/note/business/direction behavior,
+  class remove/direction/style/inline inheritance behavior, deployment and
+  object shape parsing/rendering, activity bullets and markup, Gantt
+  scheduling, JSON/YAML style classes, state inline styles, tree notation,
+  detector disambiguation, and the expanded demo-facing examples.
+
 ## [0.5.0] - 2026-05-26
 
 ### Added

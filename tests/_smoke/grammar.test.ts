@@ -69,3 +69,33 @@ describe('regex (user repro)', () => {
     expect(paths).toBeGreaterThan(0); // alternation curves
   });
 });
+
+const REGEX_LITERAL_SEQ = `@startregex
+title litteralCharacterSequence
+\\Qfoo\\E
+@endregex`;
+
+describe('regex \\Q...\\E literal sequence', () => {
+  it('parses title and \\Q...\\E body as a single literal node', () => {
+    const ast = parseToAst(REGEX_LITERAL_SEQ);
+    expect(ast.kind).toBe('regex');
+    if (ast.kind === 'regex') {
+      expect(ast.title).toBe('litteralCharacterSequence');
+      expect(ast.pattern).toBe('\\Qfoo\\E');
+    }
+  });
+
+  it('renders one title text and a single box labeled "foo"', () => {
+    const scene = compile(REGEX_LITERAL_SEQ);
+    const texts = scene.children.filter((s) => s.type === 'text');
+    const titleText = texts.find(
+      (t) => t.type === 'text' && t.text === 'litteralCharacterSequence',
+    );
+    expect(titleText).toBeDefined();
+    const fooText = texts.find((t) => t.type === 'text' && t.text === '"foo"');
+    expect(fooText).toBeDefined();
+    // Exactly one rounded-rect terminal box for the literal.
+    const rects = scene.children.filter((s) => s.type === 'rect');
+    expect(rects.length).toBe(1);
+  });
+});

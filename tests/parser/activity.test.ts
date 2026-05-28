@@ -44,6 +44,70 @@ describe('activity parser — linear', () => {
       'First', 'Second', 'Third',
     ]);
   });
+
+  it('treats `* text` bullet lines as action steps (activity-beta shortcut)', () => {
+    const a = ast(
+      [
+        '@startuml',
+        '* Action 1',
+        '* Action 2',
+        '* Action 3',
+        '@enduml',
+      ].join('\n'),
+    );
+    expect(a.body).toEqual([
+      { type: 'action', text: 'Action 1' },
+      { type: 'action', text: 'Action 2' },
+      { type: 'action', text: 'Action 3' },
+    ]);
+  });
+
+  it('nests multi-level `**`/`***` bullets via `children` (parent stack)', () => {
+    const a = ast(
+      [
+        '@startuml',
+        '* Action 1',
+        '** Sub-Action 1.1',
+        '** Sub-Action 1.2',
+        '*** Sub-Action 1.2.1',
+        '* Action 2',
+        '@enduml',
+      ].join('\n'),
+    );
+    // Top-level shows two siblings: `Action 1` (with children) and `Action 2`.
+    expect(a.body.map((n) => (n.type === 'action' ? n.text : n.type))).toEqual([
+      'Action 1',
+      'Action 2',
+    ]);
+    const a1 = a.body[0];
+    if (a1?.type !== 'action') throw new Error('expected action');
+    expect(a1.children?.map((c) => c.text)).toEqual(['Sub-Action 1.1', 'Sub-Action 1.2']);
+    const sub12 = a1.children?.[1];
+    expect(sub12?.children?.map((c) => c.text)).toEqual(['Sub-Action 1.2.1']);
+  });
+
+  it('captures `<style>` blocks into `ast.styles`', () => {
+    const a = ast(
+      [
+        '@startuml',
+        '<style>',
+        'element {MinimumWidth 150}',
+        '</style>',
+        '* Action 1',
+        '@enduml',
+      ].join('\n'),
+    );
+    expect(a.styles?.element?.minimumwidth).toBe('150');
+  });
+
+  it('still parses `:Action;` syntax identically (regression)', () => {
+    const a = ast('@startuml\n:Action 1;\n:Action 2;\n:Action 3;\n@enduml');
+    expect(a.body).toEqual([
+      { type: 'action', text: 'Action 1' },
+      { type: 'action', text: 'Action 2' },
+      { type: 'action', text: 'Action 3' },
+    ]);
+  });
 });
 
 describe('activity parser — if/elseif/else', () => {

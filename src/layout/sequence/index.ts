@@ -11,6 +11,15 @@ import type { Scene, Shape } from '../../scene/types.js';
 import { measureText } from './measure.js';
 import { drawHeader, maxHeaderHeight, participantContentWidth } from './headers.js';
 import { parseLabelMarkup, drawLabelSpans } from './markup.js';
+import {
+  buildSkin, setSkin, clearSkin, getSkin,
+  buildStyles, setStyles, clearStyles, getStyles,
+} from './skin.js';
+import {
+  buildHandwrittenNoticeShapes,
+  handwrittenNoticeHeight,
+  handwrittenNoticeWidth,
+} from '../common/handwritten.js';
 
 const TOP_PAD = 12;
 const BOTTOM_PAD = 12;
@@ -19,6 +28,10 @@ const HEADER_PAD_X = 16;
 const LANE_MIN_WIDTH = 80;
 const LANE_GAP = 50;
 const MSG_GAP = 36;
+// `A ->(N) B` — pixels of vertical slope per N unit. The arrow's head lands
+// `N * DURATION_SCALE` pixels below its tail; layout reserves that extra
+// space so the next statement starts below the slanted tip.
+const DURATION_SCALE = 2;
 const MSG_TEXT_PAD = 6;
 const MSG_TEXT_HPAD = 8;
 const SELF_MSG_W = 40;
@@ -33,6 +46,18 @@ const GROUP_PAD = 10;
 const GROUP_HEADER_HEIGHT = 18;
 const GROUP_SIDE_PAD = 8;
 const ARROW_HEAD = 8;
+// Inset for the boundary end of a found/lost message arrow — keeps the
+// head/tail marker a few pixels away from the very edge of the SVG so it
+// isn't clipped by anti-aliasing.
+const BOUNDARY_INSET = 4;
+// Minimum horizontal length for a boundary arrow's visible body. When the
+// participant is on the leftmost (or rightmost) lane, the natural distance
+// to SIDE_PAD may be near zero; widen the diagram so the arrow is readable.
+const BOUNDARY_ARROW_MIN = 40;
+// Short-boundary (`?-> X` / `X ->?`) offset from the participant's lane
+// center. The stub sits adjacent to the lifeline rather than at the diagram
+// edge. Picked small enough to stay within the side pad on edge lanes.
+const SHORT_BOUNDARY_OFFSET = 36;
 const TITLE_FONT_SIZE = 16;
 const TITLE_GAP = 12;
 const PAGE_HEADER_FONT_SIZE = 11;
@@ -46,6 +71,27 @@ const REF_PAD_Y = 8;
 const REF_TAB_FOLD = 6;
 const REF_TAB_H = 18;
 const REF_GAP = 14;
+// `box ... end box` — horizontal pad outside the contained lanes' headers,
+// vertical pad below the bottom header row, and a taller "title strip" above
+// the top header row that fits the title text without crowding the headers.
+const BOX_PAD_X = 8;
+const BOX_PAD_Y = 8;
+const BOX_TITLE_FONT_SIZE = 13;
+const BOX_TITLE_STRIP = 22;
+
+// `skinparam handwritten true` notice box constants are shared with the
+// use-case diagram and live in `../common/handwritten.ts`.
+
+// `mainframe <label>` — outer-frame rectangle with a folded-corner tab in the
+// top-left. Visually mirrors the `ref` tab: same fold-notch geometry,
+// rectangular interior. Vertical pad inside the tab is symmetric so the label
+// sits centered. The diagram body is pushed down by MAINFRAME_TAB_H + the
+// small gap below the tab so it doesn't crowd the page header / title.
+const MAINFRAME_TAB_H = 22;
+const MAINFRAME_TAB_FOLD = 6;
+const MAINFRAME_TAB_PAD_X = 12;
+const MAINFRAME_FRAME_PAD = 4;
+const MAINFRAME_GAP = 6;
 
 const FONT_FAMILY = 'sans-serif';
 const FONT_SIZE = 12;
@@ -67,6 +113,12 @@ interface PendingGroup {
   minLane: number;
   maxLane: number;
   dividers: Array<{ y: number; label: string }>;
+  /** Optional fill for the folded-corner tab. */
+  tabColor?: string;
+  /** Background fill per branch. branchColors[0] is the first branch (between
+   *  the tab strip and the first `else` divider), [1] the second, etc. An
+   *  empty string / undefined means "no fill". */
+  branchColors: Array<string | undefined>;
 }
 
 interface FinalizedActivation {
@@ -74,10 +126,75 @@ interface FinalizedActivation {
   level: number;
   yStart: number;
   yEnd: number;
+  color: string;
+}
+
+interface ActFrame {
+  yStart: number;
+  color: string;
+  /** Sender lane (for autoactivate-created frames); used by `return`. */
+  fromIdx?: number;
 }
 
 export function layoutSequence(ast: SequenceAst): Scene {
-  const parts = ast.participants;
+  setSkin(buildSkin(ast));
+  setStyles(buildStyles(ast));
+  try {
+    return doLayoutSequence(ast);
+  } finally {
+    clearSkin();
+    clearStyles();
+  }
+}
+
+/**
+ * `hide unlinked` predicate: returns true when at least one statement
+ * references the given participant id. References include message endpoints
+ * (excluding boundary `[` / `]` / `?` which have an empty id), activate /
+ * deactivate targets, note `over` / `left` / `right` targets, and ref `over`
+ * targets. Boundary stub messages don't have a real participant on one side
+ * (the empty-string id never matches a real participant), so they only
+ * contribute the non-boundary end.
+ */
+function isReferenced(id: string, stmts: SequenceStatement[]): boolean {
+  for (const s of stmts) {
+    switch (s.type) {
+      case 'message':
+        if (s.from === id || s.to === id) return true;
+        break;
+      case 'activate':
+      case 'deactivate':
+        if (s.target === id) return true;
+        break;
+      case 'note':
+      case 'ref':
+        if (s.targets.includes(id)) return true;
+        break;
+    }
+  }
+  return false;
+}
+
+function doLayoutSequence(ast: SequenceAst): Scene {
+  // `hide unlinked` — filter out participants never referenced by any
+  // statement. Box membership rides along: a box with all its members hidden
+  // is implicitly removed (no contiguous lanes share its id, so the
+  // box-grouping pass emits no run for it). A partially-hidden box shrinks
+  // to its surviving lanes.
+  // `participant X order N` — explicit column-order hint. Stable-sort on
+  // `(order ?? +Infinity)` so participants with an explicit `order` are placed
+  // first in ascending order and the rest preserve declaration order. JS's
+  // `Array.prototype.sort` is stable per spec. A no-op when no participant
+  // carries an `order` (all keys are +Infinity → no swaps).
+  const filtered = ast.hideUnlinked === true
+    ? ast.participants.filter((p) => isReferenced(p.id, ast.statements))
+    : ast.participants;
+  const parts = filtered
+    .slice()
+    .sort(
+      (a, b) =>
+        (a.order ?? Number.POSITIVE_INFINITY) - (b.order ?? Number.POSITIVE_INFINITY),
+    );
 
   if (parts.length === 0) {
     return {
@@ -145,6 +262,24 @@ export function layoutSequence(ast: SequenceAst): Scene {
     const required = noteW + NOTE_SIDE_OFFSET;
     if (required > leftExtra) leftExtra = required;
   }
+  // Found-message (`[-> X` / `[<- X`) on lane 0 needs enough left padding for
+  // the arrow body between the boundary inset and the lane center.
+  for (const stmt of ast.statements) {
+    if (stmt.type !== 'message') continue;
+    const side = stmt.fromBoundary ?? stmt.toBoundary;
+    if (side !== 'left') continue;
+    const partId = stmt.fromBoundary ? stmt.to : stmt.from;
+    if (laneIdx.get(partId) !== 0) continue;
+    const required = BOUNDARY_ARROW_MIN + BOUNDARY_INSET - headerW[0]! / 2;
+    if (required > leftExtra) leftExtra = required;
+  }
+
+  // `box ... end box` on the leftmost lane needs BOX_PAD_X of left margin so
+  // the box's left edge stays inside the diagram.
+  if (parts[0]?.box) {
+    if (BOX_PAD_X > leftExtra) leftExtra = BOX_PAD_X;
+  }
+
   // Single-lane `ref over X` on lane 0 may bleed leftward when the body is
   // wider than the header. Grow leftExtra accordingly.
   for (const stmt of ast.statements) {
@@ -241,6 +376,28 @@ export function layoutSequence(ast: SequenceAst): Scene {
     }
   }
 
+  // `box ... end box` on the rightmost lane needs BOX_PAD_X of right margin
+  // so the box's right edge stays inside the diagram.
+  if (parts[parts.length - 1]?.box) {
+    const need = laneCenters[parts.length - 1]! + headerW[parts.length - 1]! / 2 + BOX_PAD_X + SIDE_PAD;
+    if (need > diagramWidth) diagramWidth = need;
+  }
+
+  // Lost-message (`X ->]` / `X <-]`) on the rightmost lane needs enough
+  // padding on the right for the arrow body between the lane center and the
+  // boundary inset.
+  for (const stmt of ast.statements) {
+    if (stmt.type !== 'message') continue;
+    const side = stmt.fromBoundary ?? stmt.toBoundary;
+    if (side !== 'right') continue;
+    const partId = stmt.fromBoundary ? stmt.to : stmt.from;
+    const idx = laneIdx.get(partId);
+    if (idx === undefined) continue;
+    if (idx !== parts.length - 1) continue;
+    const need = laneCenters[idx]! + BOUNDARY_ARROW_MIN + BOUNDARY_INSET + SIDE_PAD;
+    if (need > diagramWidth) diagramWidth = need;
+  }
+
   // `note across` spans the full diagram. Grow width to fit the text.
   for (const stmt of ast.statements) {
     if (stmt.type !== 'note' || stmt.position !== 'across') continue;
@@ -270,13 +427,35 @@ export function layoutSequence(ast: SequenceAst): Scene {
   }
 
   const titleHeight = ast.title ? Math.ceil(TITLE_FONT_SIZE * 1.2) + TITLE_GAP : 0;
-  const headerTopY = TOP_PAD + pageHeaderH + titleHeight;
+  // When any participant is inside a `box ... end box`, push the participant
+  // headers down so the box's title strip has room to render above them.
+  const anyBoxed = parts.some((p) => p.box);
+  const boxTopExtra = anyBoxed ? BOX_TITLE_STRIP : 0;
+  const handwrittenOn = getSkin().handwritten === true;
+  const handwrittenNoticeH = handwrittenOn ? handwrittenNoticeHeight() : 0;
+  // `mainframe <label>` reserves a strip at the very top for the folded
+  // corner tab. The diagram body is shifted down by tab + gap so the outer
+  // bounding rectangle (drawn at the end) doesn't overlap any content.
+  const mainframeSpans = ast.mainframe ? parseLabelMarkup(ast.mainframe) : [];
+  const mainframeOn = mainframeSpans.length > 0;
+  const mainframeTabH = mainframeOn ? MAINFRAME_TAB_H + MAINFRAME_GAP : 0;
+  const headerTopY = TOP_PAD + handwrittenNoticeH + mainframeTabH + pageHeaderH + titleHeight + boxTopExtra;
   const headerH = maxHeaderHeight(parts);
 
   const body: Shape[] = [];
   const pageTitleShapes: Shape[] = [];
-  const actStack: number[][] = parts.map(() => []);
+  const actStack: ActFrame[][] = parts.map(() => []);
   const finalizedActs: FinalizedActivation[] = [];
+  // Lanes participate in the diagram in [bornY, diedY] — created-late
+  // participants (`A -> B **`) start at the create message's y; destroyed
+  // participants (`A -> B !!`) end at the destroy message's y with a red X.
+  const bornY: Array<number | undefined> = parts.map(() => undefined);
+  const diedY: Array<number | undefined> = parts.map(() => undefined);
+  const destroyMarks: Array<{ laneIdx: number; y: number }> = [];
+  // LIFO of (laneIdx, fromIdx) for `return`: pops the most-recent
+  // autoactivate-created activation across all lanes.
+  const callStack: Array<{ laneIdx: number; fromIdx: number }> = [];
+  let autoActive = false;
   const groupStack: PendingGroup[] = [];
   // Each entry tracks the vertical range of a single page so we can draw
   // separate lifelines + top/bottom headers per page.
@@ -306,12 +485,14 @@ export function layoutSequence(ast: SequenceAst): Scene {
         const pageBottomY = y;
         for (let li = 0; li < parts.length; li++) {
           while (actStack[li]!.length > 0) {
-            const yStart = actStack[li]!.pop()!;
+            const frame = actStack[li]!.pop()!;
             finalizedActs.push({
-              laneIdx: li, level: actStack[li]!.length, yStart, yEnd: pageBottomY,
+              laneIdx: li, level: actStack[li]!.length,
+              yStart: frame.yStart, yEnd: pageBottomY, color: frame.color,
             });
           }
         }
+        callStack.length = 0;
         while (groupStack.length > 0) {
           const g = groupStack.pop()!;
           if (g.minLane > g.maxLane) { g.minLane = 0; g.maxLane = parts.length - 1; }
@@ -346,7 +527,7 @@ export function layoutSequence(ast: SequenceAst): Scene {
         const idx = laneIdx.get(stmt.target);
         if (idx === undefined) break;
         touch(idx);
-        actStack[idx]!.push(y - MSG_GAP / 2);
+        actStack[idx]!.push({ yStart: y - MSG_GAP / 2, color: COLOR_ACTIVATION_FILL });
         break;
       }
 
@@ -354,34 +535,88 @@ export function layoutSequence(ast: SequenceAst): Scene {
         const idx = laneIdx.get(stmt.target);
         if (idx === undefined) break;
         touch(idx);
-        const yStart = actStack[idx]!.pop();
-        if (yStart !== undefined) {
+        const frame = actStack[idx]!.pop();
+        if (frame !== undefined) {
           finalizedActs.push({
             laneIdx: idx,
             level: actStack[idx]!.length,
-            yStart,
+            yStart: frame.yStart,
             yEnd: y - MSG_GAP / 2,
+            color: frame.color,
           });
         }
         break;
       }
 
-      case 'groupStart':
-        groupStack.push({
+      case 'autoactivate':
+        autoActive = stmt.enabled;
+        break;
+
+      case 'return': {
+        // Pop the most recent autoactivate-created frame: draw a dashed arrow
+        // from its target lane back to its sender, then finalize its bar.
+        const call = callStack.pop();
+        if (!call) break;
+        const { laneIdx: ti, fromIdx: fi } = call;
+        touch(ti, fi);
+        const frame = actStack[ti]!.pop();
+        if (frame !== undefined) {
+          finalizedActs.push({
+            laneIdx: ti,
+            level: actStack[ti]!.length,
+            yStart: frame.yStart,
+            yEnd: y - MSG_GAP / 2,
+            color: frame.color,
+          });
+        }
+        const label = stmt.text;
+        if (ti === fi) {
+          const self = drawSelfMessage(laneCenters[ti]!, y, label, 'dashed', false);
+          body.push(...self.shapes);
+          y += self.height + MSG_GAP;
+        } else {
+          const lineCount = label ? label.split('\n').length : 1;
+          const labelHeadroom = lineCount > 1 ? (lineCount - 1) * MSG_LINE_H : 0;
+          y += labelHeadroom;
+          body.push(
+            ...drawMessage(
+              laneCenters[ti]!,
+              laneCenters[fi]!,
+              y,
+              label,
+              'dashed',
+              ti < fi,
+              'none',
+              'arrow',
+              undefined,
+            ),
+          );
+          y += MSG_GAP;
+        }
+        break;
+      }
+
+      case 'groupStart': {
+        const pg: PendingGroup = {
           kind: stmt.kind,
           label: stmt.label,
           yStart: y - MSG_GAP / 2,
           minLane: parts.length,
           maxLane: -1,
           dividers: [],
-        });
+          branchColors: [stmt.branchColor],
+        };
+        if (stmt.tabColor) pg.tabColor = stmt.tabColor;
+        groupStack.push(pg);
         y += GROUP_HEADER_HEIGHT + GROUP_PAD;
         break;
+      }
 
       case 'groupElse': {
         const top = groupStack[groupStack.length - 1];
         if (top) {
           top.dividers.push({ y: y - MSG_GAP / 2, label: stmt.label });
+          top.branchColors.push(stmt.branchColor);
           y += GROUP_PAD;
         }
         break;
@@ -443,22 +678,119 @@ export function layoutSequence(ast: SequenceAst): Scene {
       }
 
       case 'message': {
+        // Found/lost boundary message — one end is the diagram edge instead
+        // of a participant. Drawn as a short horizontal arrow between the
+        // participant's lane center and the SIDE_PAD inset on the relevant
+        // edge. Reuses drawMessage with the existing marker vocabulary.
+        if (stmt.fromBoundary || stmt.toBoundary) {
+          const partId = stmt.fromBoundary ? stmt.to : stmt.from;
+          const partIdx = laneIdx.get(partId);
+          if (partIdx === undefined) break;
+          touch(partIdx);
+          const label = labels[i] ?? '';
+          const lineCount = label ? label.split('\n').length : 1;
+          const labelHeadroom = lineCount > 1 ? (lineCount - 1) * MSG_LINE_H : 0;
+          y += labelHeadroom;
+          const side = stmt.fromBoundary ?? stmt.toBoundary!;
+          const partX = laneCenters[partIdx]!;
+          // For long boundaries (`[` / `]`), the non-participant end is the
+          // diagram's left/right edge minus the inset. For short boundaries
+          // (`?`), it's a small fixed offset from the participant's lane
+          // center on the appropriate side.
+          let edgeX: number;
+          if (side === 'left') edgeX = SIDE_PAD + BOUNDARY_INSET;
+          else if (side === 'right') edgeX = diagramWidth - SIDE_PAD - BOUNDARY_INSET;
+          else if (side === 'short-left') edgeX = partX - SHORT_BOUNDARY_OFFSET;
+          else edgeX = partX + SHORT_BOUNDARY_OFFSET; // 'short-right'
+          // x1/x2 are the arrow's "from" / "to" x coordinates respectively, so
+          // the existing leftToRight = fromX < toX rule still produces the
+          // correct head orientation.
+          const x1 = stmt.fromBoundary ? edgeX : partX;
+          const x2 = stmt.fromBoundary ? partX : edgeX;
+          const slopeDy = stmt.duration ? stmt.duration * DURATION_SCALE : 0;
+          body.push(
+            ...drawMessage(
+              x1,
+              x2,
+              y,
+              label,
+              stmt.style,
+              x1 < x2,
+              stmt.startMarker ?? 'none',
+              stmt.endMarker ?? 'arrow',
+              stmt.color,
+              slopeDy > 0 ? y + slopeDy : undefined,
+            ),
+          );
+          y += MSG_GAP + slopeDy;
+          break;
+        }
         const fromIdx = laneIdx.get(stmt.from);
         const toIdx = laneIdx.get(stmt.to);
         if (fromIdx === undefined || toIdx === undefined) break;
         touch(fromIdx, toIdx);
         const label = labels[i] ?? '';
 
+        // `create` marks the target's lifeline starting point. The header
+        // for that lane is drawn at this y instead of at the diagram top.
+        if (stmt.create && bornY[toIdx] === undefined) {
+          bornY[toIdx] = y - MSG_GAP / 2;
+        }
+
+        // Vertical space for the created participant's box (sits just above
+        // the arrow tip). Without this, the arrow would pass through the
+        // header rectangle.
+        const createHeadroom = stmt.create ? headerH + 4 : 0;
+        if (createHeadroom > 0) y += createHeadroom;
+
+        // `A -> B --` — deactivate the sender BEFORE the arrow's y is committed
+        // so the arrow leaves from the (now-shorter) outer frame.
+        if (stmt.deactivateSource) {
+          const frame = actStack[fromIdx]!.pop();
+          if (frame !== undefined) {
+            finalizedActs.push({
+              laneIdx: fromIdx,
+              level: actStack[fromIdx]!.length,
+              yStart: frame.yStart,
+              yEnd: y - 2,
+              color: frame.color,
+            });
+            // If the popped frame was tracked by the call stack, drop the
+            // matching entry so a later `return` doesn't double-pop it.
+            for (let k = callStack.length - 1; k >= 0; k--) {
+              if (callStack[k]!.laneIdx === fromIdx) {
+                callStack.splice(k, 1);
+                break;
+              }
+            }
+          }
+        }
+
+        // Whether this message should push an activation frame on the target.
+        // Either autoactivate is on, OR the message has a per-message `++`.
+        const pushActivation = autoActive || stmt.activateTarget === true;
+
         if (fromIdx === toIdx) {
           const self = drawSelfMessage(
             laneCenters[fromIdx]!, y, label, stmt.style, stmt.reverse,
           );
           body.push(...self.shapes);
+          const msgY = y + (self.height - SELF_MSG_H / 2);
+          if (pushActivation) {
+            actStack[toIdx]!.push({
+              yStart: y - 2,
+              color: stmt.color ?? '#ffffff',
+              fromIdx,
+            });
+            callStack.push({ laneIdx: toIdx, fromIdx });
+          }
           y += self.height + MSG_GAP;
+          void msgY;
         } else {
           const lineCount = label ? label.split('\n').length : 1;
           const labelHeadroom = lineCount > 1 ? (lineCount - 1) * MSG_LINE_H : 0;
           y += labelHeadroom;
+          const slopeDy = stmt.duration ? stmt.duration * DURATION_SCALE : 0;
           body.push(
             ...drawMessage(
               laneCenters[fromIdx]!,
@@ -470,9 +802,22 @@ export function layoutSequence(ast: SequenceAst): Scene {
               stmt.startMarker ?? 'none',
               stmt.endMarker ?? 'arrow',
               stmt.color,
+              slopeDy > 0 ? y + slopeDy : undefined,
             ),
           );
-          y += MSG_GAP;
+          if (pushActivation) {
+            actStack[toIdx]!.push({
+              yStart: y - 2,
+              color: stmt.color ?? '#ffffff',
+              fromIdx,
+            });
+            callStack.push({ laneIdx: toIdx, fromIdx });
+          }
+          if (stmt.destroy) {
+            destroyMarks.push({ laneIdx: toIdx, y });
+            diedY[toIdx] = y + 8;
+          }
+          y += MSG_GAP + slopeDy;
         }
         break;
       }
@@ -483,12 +828,13 @@ export function layoutSequence(ast: SequenceAst): Scene {
 
   for (let i = 0; i < parts.length; i++) {
     while (actStack[i]!.length > 0) {
-      const yStart = actStack[i]!.pop()!;
+      const frame = actStack[i]!.pop()!;
       finalizedActs.push({
         laneIdx: i,
         level: actStack[i]!.length,
-        yStart,
-        yEnd: bottomY,
+        yStart: frame.yStart,
+        yEnd: diedY[i] ?? bottomY,
+        color: frame.color,
       });
     }
   }
@@ -507,21 +853,48 @@ export function layoutSequence(ast: SequenceAst): Scene {
 
   // Per-page lifelines + top/bottom headers. Each page's lifeline spans only
   // its own message range; headers repeat at every page boundary.
+  // Lanes with `bornY` set (created mid-diagram) have their top header drawn
+  // at the message's y instead of at the page top, and the lifeline starts
+  // from there. Lanes with `diedY` set (destroyed mid-diagram) have their
+  // lifeline truncated at that y and skip the bottom header.
   const lifelines: Shape[] = [];
   const headers: Shape[] = [];
   for (const page of pages) {
     const pageBottomLine = page.bottomY + 8;
-    for (const cx of laneCenters) {
-      lifelines.push({
-        type: 'line',
-        x1: cx, y1: page.topY + headerH,
-        x2: cx, y2: pageBottomLine,
-        style: { stroke: COLOR_LIFELINE, strokeWidth: 1, strokeDasharray: '4,4' },
-      });
+    for (let i = 0; i < parts.length; i++) {
+      const cx = laneCenters[i]!;
+      const topY = bornY[i] !== undefined
+        ? Math.max(page.topY + headerH, bornY[i]!)
+        : page.topY + headerH;
+      const botY = diedY[i] !== undefined
+        ? Math.min(pageBottomLine, diedY[i]!)
+        : pageBottomLine;
+      if (botY > topY) {
+        const lifelineStroke = getSkin().lifelineBorderColor ?? COLOR_LIFELINE;
+        // `<style> lifeLine { LineStyle ... }` override. `'none'` means
+        // explicit solid (no dasharray); other strings replace the default;
+        // `undefined` keeps the default `'4,4'`.
+        const styleDash = getStyles().lifelineDasharray;
+        const dashStyle: { stroke: string; strokeWidth: number; strokeDasharray?: string } = {
+          stroke: lifelineStroke, strokeWidth: 1,
+        };
+        if (styleDash === undefined) dashStyle.strokeDasharray = '4,4';
+        else if (styleDash !== 'none') dashStyle.strokeDasharray = styleDash;
+        lifelines.push({
+          type: 'line',
+          x1: cx, y1: topY, x2: cx, y2: botY,
+          style: dashStyle,
+        });
+      }
     }
     for (let i = 0; i < parts.length; i++) {
-      headers.push(...drawHeader(parts[i]!, laneCenters[i]!, headerW[i]!, page.topY, headerH));
-      headers.push(...drawHeader(parts[i]!, laneCenters[i]!, headerW[i]!, pageBottomLine, headerH));
+      const topHeaderY = bornY[i] !== undefined
+        ? Math.max(page.topY, bornY[i]! - headerH)
+        : page.topY;
+      headers.push(...drawHeader(parts[i]!, laneCenters[i]!, headerW[i]!, topHeaderY, headerH));
+      if (diedY[i] === undefined) {
+        headers.push(...drawHeader(parts[i]!, laneCenters[i]!, headerW[i]!, pageBottomLine, headerH));
+      }
     }
   }
   const lifelineBottom = pages[pages.length - 1]!.bottomY + 8;
@@ -532,8 +905,22 @@ export function layoutSequence(ast: SequenceAst): Scene {
     y: r.yStart,
     w: ACT_WIDTH,
     h: r.yEnd - r.yStart,
-    style: { fill: COLOR_ACTIVATION_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+    style: { fill: r.color, stroke: COLOR_LINE, strokeWidth: 1 },
   }));
+
+  // Red X marker for destroyed participants — drawn on top of the lane at
+  // the destroy message's y.
+  const destroyShapes: Shape[] = [];
+  for (const d of destroyMarks) {
+    const cx = laneCenters[d.laneIdx]!;
+    const cy = d.y;
+    const r = 7;
+    const style = { stroke: '#a00', strokeWidth: 2.5 };
+    destroyShapes.push(
+      { type: 'line', x1: cx - r, y1: cy - r, x2: cx + r, y2: cy + r, style },
+      { type: 'line', x1: cx - r, y1: cy + r, x2: cx + r, y2: cy - r, style },
+    );
+  }
 
   const pageHeaderShapes: Shape[] = pageHeaderLines.map((line, i) => ({
     type: 'text',
@@ -572,21 +959,187 @@ export function layoutSequence(ast: SequenceAst): Scene {
 
   const totalHeight = lifelineBottom + headerH + pageFooterH + BOTTOM_PAD;
 
+  // `box ... end box` rectangles. Built once at the end so we know the full
+  // diagram's vertical extent (top of first page header → bottom of last
+  // page header). Drawn BEFORE lifelines/acts/headers so they sit behind
+  // every other shape (z-order is array order in the renderer).
+  const boxShapes = buildBoxShapes(parts, laneCenters, headerW, pages, headerH, lifelineBottom);
+
+  // `skinparam handwritten true` — emit the upstream-PlantUML "use !option"
+  // notice at the very top. Built last so we can size the box against the
+  // final diagram width if needed.
+  const handwrittenShapes: Shape[] = [];
+  if (handwrittenOn) {
+    const boxW = handwrittenNoticeWidth();
+    // If the notice is wider than the diagram, grow the diagram width.
+    const need = boxW + SIDE_PAD * 2;
+    if (need > diagramWidth) diagramWidth = need;
+    handwrittenShapes.push(...buildHandwrittenNoticeShapes(SIDE_PAD, TOP_PAD));
+  }
+
+  // `mainframe <label>` — outer bounding rectangle with a folded-corner tab
+  // in the top-left. Built last so we can size the frame against the final
+  // diagram width / height. Tab geometry reuses the same fold-notch shape as
+  // `drawRef`. The label is rendered through `parseLabelMarkup` so `**bold**`
+  // (and other inline markup) renders correctly.
+  const mainframeShapes: Shape[] = [];
+  if (mainframeOn) {
+    const spans = mainframeSpans;
+    let labelW = 0;
+    for (const sp of spans) labelW += measureText(sp.text, FONT_SIZE).width;
+    const tabW = labelW + MAINFRAME_TAB_PAD_X * 2;
+    // Grow the diagram if the tab plus the fold notch + a tiny right buffer
+    // would otherwise spill past the frame's right edge.
+    const tabNeed = MAINFRAME_FRAME_PAD + tabW + MAINFRAME_TAB_FOLD + SIDE_PAD;
+    if (tabNeed > diagramWidth) diagramWidth = tabNeed;
+    const fx = MAINFRAME_FRAME_PAD;
+    const fy = MAINFRAME_FRAME_PAD;
+    const fw = diagramWidth - MAINFRAME_FRAME_PAD * 2;
+    const fh = totalHeight - MAINFRAME_FRAME_PAD * 2;
+    // Outer frame — no fill, dark stroke.
+    mainframeShapes.push({
+      type: 'rect',
+      x: fx, y: fy, w: fw, h: fh,
+      style: { fill: 'none', stroke: '#000', strokeWidth: 1 },
+    });
+    // Folded-corner tab anchored to the frame's top-left interior.
+    const tx = fx;
+    const ty = fy;
+    mainframeShapes.push({
+      type: 'polygon',
+      points: [
+        [tx, ty],
+        [tx + tabW, ty],
+        [tx + tabW + MAINFRAME_TAB_FOLD, ty + MAINFRAME_TAB_FOLD],
+        [tx + tabW + MAINFRAME_TAB_FOLD, ty + MAINFRAME_TAB_H],
+        [tx, ty + MAINFRAME_TAB_H],
+      ],
+      style: { fill: '#fff', stroke: '#000', strokeWidth: 1 },
+    });
+    // Fold notch — the small diagonal that closes the tab's bottom-right.
+    mainframeShapes.push({
+      type: 'polyline',
+      points: [
+        [tx + tabW, ty],
+        [tx + tabW, ty + MAINFRAME_TAB_FOLD],
+        [tx + tabW + MAINFRAME_TAB_FOLD, ty + MAINFRAME_TAB_FOLD],
+      ],
+      style: { fill: 'none', stroke: '#000', strokeWidth: 1 },
+    });
+    // Bold-aware label inside the tab, vertically centered.
+    mainframeShapes.push(
+      ...drawLabelSpans(
+        spans,
+        tx + tabW / 2,
+        ty + MAINFRAME_TAB_H / 2,
+        'middle',
+        'middle',
+        FONT_SIZE,
+      ),
+    );
+  }
+
+  // Background skinparam — emit a full-canvas rect behind everything so the
+  // diagram body sits on the configured color instead of the SVG default.
+  const skin = getSkin();
+  const bgShapes: Shape[] = [];
+  if (skin.backgroundColor) {
+    bgShapes.push({
+      type: 'rect',
+      x: 0, y: 0, w: diagramWidth, h: totalHeight,
+      style: { fill: skin.backgroundColor, stroke: 'none', strokeWidth: 0 },
+    });
+  }
+
   return {
     width: diagramWidth,
     height: totalHeight,
-    background: '#fff',
+    background: skin.backgroundColor ?? '#fff',
     children: [
+      ...bgShapes,
       ...pageHeaderShapes,
       ...titleShapes,
       ...pageTitleShapes,
+      ...boxShapes,
       ...lifelines,
       ...acts,
       ...body,
       ...headers,
+      ...destroyShapes,
       ...pageFooterShapes,
+      ...handwrittenShapes,
+      ...mainframeShapes,
     ],
   };
+}
+
+/**
+ * Builds the visual rectangles for every `box ... end box` declaration in
+ * the diagram. Contiguous lanes sharing the same `box.id` are grouped into a
+ * single rectangle whose horizontal extent wraps the leftmost lane's header
+ * to the rightmost lane's header plus BOX_PAD_X, and whose vertical extent
+ * spans every page's top header through bottom header. Returns shapes ready
+ * to drop into the scene tree (rectangle + optional title text).
+ */
+function buildBoxShapes(
+  parts: import('../../ast/sequence.js').Participant[],
+  laneCenters: number[],
+  headerW: number[],
+  pages: Array<{ topY: number; bottomY: number }>,
+  headerH: number,
+  lifelineBottom: number,
+): Shape[] {
+  if (parts.length === 0 || pages.length === 0) return [];
+  // Group contiguous lanes with the same box id. A non-boxed lane breaks the
+  // run; lanes inside the same box but with another box between are unlikely
+  // (PlantUML rejects nested boxes) but we still group only on contiguous
+  // same-id runs.
+  type Run = { box: NonNullable<import('../../ast/sequence.js').Participant['box']>; lo: number; hi: number };
+  const runs: Run[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const b = parts[i]!.box;
+    if (!b) continue;
+    const last = runs[runs.length - 1];
+    if (last && last.box.id === b.id && last.hi === i - 1) {
+      last.hi = i;
+    } else {
+      runs.push({ box: b, lo: i, hi: i });
+    }
+  }
+  if (runs.length === 0) return [];
+
+  // Vertical extent: from just above the first page's top header (with a
+  // title strip carved out above) down to just below the bottom header on
+  // the last page.
+  const top = pages[0]!.topY - BOX_TITLE_STRIP;
+  const bottom = lifelineBottom + headerH + BOX_PAD_Y;
+
+  const shapes: Shape[] = [];
+  for (const run of runs) {
+    const left = laneCenters[run.lo]! - headerW[run.lo]! / 2 - BOX_PAD_X;
+    const right = laneCenters[run.hi]! + headerW[run.hi]! / 2 + BOX_PAD_X;
+    const fill = run.box.color ?? '#eeeeee';
+    shapes.push({
+      type: 'rect',
+      x: left,
+      y: top,
+      w: right - left,
+      h: bottom - top,
+      style: { fill, stroke: '#888', strokeWidth: 1 },
+    });
+    if (run.box.title) {
+      shapes.push({
+        type: 'text',
+        x: left + 8,
+        y: top + BOX_TITLE_STRIP - 6,
+        text: run.box.title,
+        anchor: 'start',
+        baseline: 'alphabetic',
+        font: { family: FONT_FAMILY, size: BOX_TITLE_FONT_SIZE, weight: 'bold', color: '#000' },
+      });
+    }
+  }
+  return shapes;
 }
 
 function precomputeMessageLabels(stmts: SequenceStatement[]): string[] {
@@ -812,23 +1365,36 @@ function drawMessage(
   leftToRight: boolean,
   startMarker: ArrowMarker,
   endMarker: ArrowMarker,
-  color: string = COLOR_LINE,
+  colorIn?: string,
+  // Optional end-y for slanted/timed arrows (`A ->(N) B`). When omitted, the
+  // arrow is horizontal (y1 === y2 === y). When provided, the tail sits at
+  // (x1, y) and the head at (x2, yEnd); the line slopes accordingly. Arrow
+  // heads stay horizontal — the slope is mild, and the head's tip lands at
+  // the slanted end so it visually anchors to the receiver's lifeline.
+  yEnd?: number,
 ): Shape[] {
+  // Per-message color (from the arrow's `[#color]`) wins; otherwise pick up
+  // the diagram-wide skinparam ArrowColor; otherwise the default ink color.
+  const color = colorIn ?? getSkin().arrowColor ?? COLOR_LINE;
   const lineStyle =
     style === 'dashed'
       ? { stroke: color, strokeWidth: 1, strokeDasharray: '5,3' }
       : { stroke: color, strokeWidth: 1 };
+  const y2 = yEnd ?? y;
   const shapes: Shape[] = [
-    { type: 'line', x1, y1: y, x2, y2: y, style: lineStyle },
+    { type: 'line', x1, y1: y, x2, y2, style: lineStyle },
   ];
   const endTipPointsRight = leftToRight;
   const startTipPointsRight = !leftToRight;
-  shapes.push(...drawArrowMarker(endMarker, x2, y, endTipPointsRight, color));
+  shapes.push(...drawArrowMarker(endMarker, x2, y2, endTipPointsRight, color));
   shapes.push(...drawArrowMarker(startMarker, x1, y, startTipPointsRight, color));
   if (text) {
     const lines = text.split('\n');
     const cx = (x1 + x2) / 2;
-    const baseY = y - MSG_TEXT_PAD;
+    // Label rides above the midpoint of the (possibly slanted) line so it
+    // tracks the arrow's vertical center for timed messages.
+    const midY = (y + y2) / 2;
+    const baseY = midY - MSG_TEXT_PAD;
     for (let i = 0; i < lines.length; i++) {
       const offset = (lines.length - 1 - i) * MSG_LINE_H;
       const spans = parseLabelMarkup(lines[i]!);
@@ -855,10 +1421,11 @@ function drawSelfMessage(
   const lines = text ? text.split('\n') : [];
   const textBlockH = lines.length > 0 ? lines.length * MSG_LINE_H + 4 : 0;
   const loopY = y + textBlockH;
+  const arrowColor = getSkin().arrowColor ?? COLOR_LINE;
   const lineStyle =
     style === 'dashed'
-      ? { stroke: COLOR_LINE, strokeWidth: 1, fill: 'none', strokeDasharray: '5,3' }
-      : { stroke: COLOR_LINE, strokeWidth: 1, fill: 'none' };
+      ? { stroke: arrowColor, strokeWidth: 1, fill: 'none', strokeDasharray: '5,3' }
+      : { stroke: arrowColor, strokeWidth: 1, fill: 'none' };
 
   const shapes: Shape[] = [];
 
@@ -888,7 +1455,7 @@ function drawSelfMessage(
   // Arrow head sits at the lifeline, pointing back INTO it from the loop side.
   // For `->`, that means pointing left (leftToRight=false flips the polygon).
   // For `<-`, the loop is on the left, so arrow points right (leftToRight=true).
-  shapes.push(arrowHead(x1, loopY + SELF_MSG_H, reverse));
+  shapes.push(arrowHead(x1, loopY + SELF_MSG_H, reverse, arrowColor));
 
   return { shapes, height: textBlockH + SELF_MSG_H };
 }
@@ -1208,7 +1775,31 @@ function drawGroup(
   const tabW = tabTextW + 14;
   const tabH = GROUP_HEADER_HEIGHT;
 
-  const shapes: Shape[] = [
+  const shapes: Shape[] = [];
+
+  // Per-branch background fills, emitted FIRST so they sit behind dividers,
+  // arrow content, and the outer frame stroke. Each branch occupies the band
+  // from its top y (just below the tab strip for branch 0, just below the
+  // previous divider otherwise) to the next divider's y (or `yEnd` for the
+  // last branch). Inset by 1px so the fill doesn't overpaint the stroke.
+  const branchCount = g.dividers.length + 1;
+  for (let i = 0; i < branchCount; i++) {
+    const fill = g.branchColors[i];
+    if (!fill) continue;
+    const yTop = i === 0 ? g.yStart + tabH : g.dividers[i - 1]!.y;
+    const yBot = i < g.dividers.length ? g.dividers[i]!.y : yEnd;
+    if (yBot <= yTop) continue;
+    shapes.push({
+      type: 'rect',
+      x: xLeft + 1,
+      y: yTop,
+      w: w - 2,
+      h: yBot - yTop - 1,
+      style: { fill, stroke: 'none', strokeWidth: 0 },
+    });
+  }
+
+  shapes.push(
     {
       type: 'rect',
       x: xLeft,
@@ -1226,7 +1817,11 @@ function drawGroup(
         [xLeft + tabW + 4, g.yStart + tabH],
         [xLeft, g.yStart + tabH],
       ],
-      style: { fill: COLOR_GROUP_TAB_FILL, stroke: COLOR_GROUP_STROKE, strokeWidth: 1 },
+      style: {
+        fill: g.tabColor ?? COLOR_GROUP_TAB_FILL,
+        stroke: COLOR_GROUP_STROKE,
+        strokeWidth: 1,
+      },
     },
     {
       type: 'text',
@@ -1237,7 +1832,7 @@ function drawGroup(
       baseline: 'middle',
       font: { family: FONT_FAMILY, size: FONT_GROUP, color: '#000', weight: 'bold' },
     },
-  ];
+  );
 
   for (const d of g.dividers) {
     shapes.push({
@@ -1271,14 +1866,21 @@ function drawDivider(stmt: DividerStmt, y: number, totalWidth: number): Shape[] 
     // no boxed pill.
     const spans = parseLabelMarkup(stmt.label);
     const lineY = y + DIVIDER_HEIGHT / 2;
+    // `<style> delay { LineStyle ... }` override. `'none'` means explicit
+    // solid (no dasharray); other strings replace the default; `undefined`
+    // keeps the default `'2,3'`.
+    const delayDash = getStyles().delayDasharray;
+    const lineStyle: { stroke: string; strokeWidth: number; strokeDasharray?: string } = {
+      stroke: COLOR_GROUP_STROKE, strokeWidth: 1,
+    };
+    if (delayDash === undefined) lineStyle.strokeDasharray = '2,3';
+    else if (delayDash !== 'none') lineStyle.strokeDasharray = delayDash;
     const shapes: Shape[] = [
       {
         type: 'line',
         x1: SIDE_PAD, y1: lineY,
         x2: totalWidth - SIDE_PAD, y2: lineY,
-        style: {
-          stroke: COLOR_GROUP_STROKE, strokeWidth: 1, strokeDasharray: '2,3',
-        },
+        style: lineStyle,
       },
     ];
     if (stmt.label) {

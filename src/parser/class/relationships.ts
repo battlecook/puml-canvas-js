@@ -1,12 +1,64 @@
-import type { ClassRelationship, EndMarker, LabelDirection, RelationKind } from '../../ast/class.js';
+import type {
+  ClassRelationship,
+  EndMarker,
+  LabelDirection,
+  RelationDirection,
+  RelationKind,
+} from '../../ast/class.js';
 import { ARROW, ARROW_FULL, REL_LEFT, REL_RIGHT } from './patterns.js';
 
+/**
+ * Inline direction qualifier embedded in an arrow body, e.g. the `left` in
+ * `-left->` or the `u` in `--u->`. PlantUML accepts the four cardinal words
+ * (`left`/`right`/`up`/`down`) and their single-letter abbreviations
+ * (`l`/`r`/`u`/`d`), lowercased.
+ *
+ * The pattern requires whitespace (or start/end) on either flank so an inner
+ * substring like `:left-side:` in an endpoint isn't mistakenly stripped. The
+ * arrow head/tail markers (`<|`, `<`, `o`, `*`, `|>`, `>`) are tolerated on
+ * the outside of the dash run so the hint can appear in any of:
+ *   `-left->`, `--right->`, `<-up-`, `<|-down-|>`, etc.
+ */
+const DIRECTION_HINT =
+  /(^|\s)((?:<\||<|o|\*)?-+)(left|right|up|down|l|r|u|d)(-+(?:\|>|>|o|\*)?)(?=\s|$)/;
+
+const DIRECTION_LETTER: Record<string, RelationDirection> = {
+  l: 'left',
+  r: 'right',
+  u: 'up',
+  d: 'down',
+  left: 'left',
+  right: 'right',
+  up: 'up',
+  down: 'down',
+};
+
+/**
+ * Detect and strip a `-left-` / `--up-` / `-r-` style direction qualifier
+ * from the arrow body. Returns the line with the alpha token removed (the
+ * surrounding dashes are preserved so the remainder still classifies as a
+ * normal arrow) and the resolved direction. Returns `null` on the direction
+ * field if no hint is present.
+ */
+function stripDirectionHint(line: string): { line: string; direction?: RelationDirection } {
+  const m = DIRECTION_HINT.exec(line);
+  if (!m) return { line };
+  const direction = DIRECTION_LETTER[m[3]!.toLowerCase()]!;
+  // Remove the alpha token but KEEP the dashes on either side — together they
+  // still form a well-formed arrow body for the downstream tokenizer.
+  const start = m.index + m[1]!.length + m[2]!.length;
+  const end = start + m[3]!.length;
+  return { line: line.slice(0, start) + line.slice(end), direction };
+}
+
 export function parseRelationship(line: string): ClassRelationship | null {
-  const found = findArrow(line);
+  const stripped = stripDirectionHint(line);
+  const work = stripped.line;
+  const found = findArrow(work);
   if (!found) return null;
 
-  const leftRaw = line.slice(0, found.idx).trim();
-  let rightRaw = line.slice(found.idx + found.arrow.length).trim();
+  const leftRaw = work.slice(0, found.idx).trim();
+  let rightRaw = work.slice(found.idx + found.arrow.length).trim();
   let label = '';
   let labelDirection: LabelDirection = 'none';
 
@@ -37,7 +89,7 @@ export function parseRelationship(line: string): ClassRelationship | null {
 
   const cls = classify(found.arrow);
 
-  return {
+  const rel: ClassRelationship = {
     source,
     target,
     sourceMult,
@@ -50,6 +102,8 @@ export function parseRelationship(line: string): ClassRelationship | null {
     label,
     labelDirection,
   };
+  if (stripped.direction) rel.direction = stripped.direction;
+  return rel;
 }
 
 function findArrow(line: string): { idx: number; arrow: string } | null {
@@ -67,7 +121,22 @@ function findArrow(line: string): { idx: number; arrow: string } | null {
 
 function findUnquotedColon(s: string): number {
   let inQuote = false;
-  for (let i = 0; i < s.length; i++) {
+  // If the right-hand side starts with `:Name:` (use-case actor shorthand),
+  // the surrounding `:`s are part of the endpoint, not a label separator.
+  // Skip past the second `:` of that shorthand so the search for a label
+  // colon doesn't latch onto the actor's opening `:`. The shorthand body
+  // must not contain `:` itself (matching the REL_RIGHT pattern `:[^:"]+:`).
+  let start = 0;
+  if (s.startsWith(':')) {
+    const close = s.indexOf(':', 1);
+    if (close !== -1) {
+      const body = s.slice(1, close);
+      if (body.length > 0 && !/["\s]/.test(body)) {
+        start = close + 1;
+      }
+    }
+  }
+  for (let i = start; i < s.length; i++) {
     if (s[i] === '"') inQuote = !inQuote;
     else if (s[i] === ':' && !inQuote) return i;
   }
@@ -87,7 +156,11 @@ function classify(arrow: string): {
   leftMarker: EndMarker;
   rightMarker: EndMarker;
 } {
-  const style: 'solid' | 'dashed' = arrow.includes('..') ? 'dashed' : 'solid';
+  // Any dot in the body of the arrow token makes it dashed. The original
+  // grammar only allowed `..` (two-or-more dots); the relaxed grammar also
+  // accepts the single-dot shorthand `.>` (PlantUML compat), which must still
+  // classify as dashed.
+  const style: 'solid' | 'dashed' = arrow.includes('.') ? 'dashed' : 'solid';
 
   const leftMarker: EndMarker = arrow.startsWith('<|')
     ? 'triangle'

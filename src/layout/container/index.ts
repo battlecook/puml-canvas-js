@@ -4,8 +4,9 @@ import type {
   ContainerNodeKind,
   ContainerRelationship,
 } from '../../ast/container.js';
+import type { LabelBlock } from '../../ast/usecase.js';
 import type { ClassRelationship } from '../../ast/class.js';
-import type { Scene, Shape } from '../../scene/types.js';
+import type { Scene, Shape, Style } from '../../scene/types.js';
 import { measureText } from '../sequence/measure.js';
 import {
   assignLayers,
@@ -25,6 +26,11 @@ import {
 } from '../common/edges.js';
 import type { BoxSize, EdgeAttrs, EdgeStyle, NodeCenter, Position } from '../common/types.js';
 import { layoutNested } from './nested.js';
+import {
+  parseLabelMarkup,
+  drawLabelSpans,
+  measureSpansWidth,
+} from '../sequence/markup.js';
 
 function hasAnyChildren(nodes: ContainerNode[]): boolean {
   for (const n of nodes) {
@@ -59,6 +65,10 @@ const INTERFACE_LABEL_GAP = 4;
 
 const FONT_FAMILY = 'sans-serif';
 const EDGE_LABEL_FONT = 11;
+const FOOTER_FONT = 12;
+const FOOTER_LINE_H = 16;
+const FOOTER_GAP = 12;
+const COLOR_FOOTER = '#888';
 
 const COLOR_LINE = '#222';
 const COLOR_EDGE = '#444';
@@ -168,12 +178,55 @@ export function layoutContainer(ast: ContainerAst): Scene {
     shapes.push(...drawNode(node, pos, sizes.get(node.id)!));
   }
 
+  // `footer <text>` directive — bottom-center, supports Creole markup.
+  const footerLines = ast.footer ? ast.footer.split('\n') : [];
+  let footerW = 0;
+  if (footerLines.length > 0) {
+    for (const line of footerLines) {
+      const w = measureSpansWidth(parseLabelMarkup(line), FOOTER_FONT);
+      if (w > footerW) footerW = w;
+    }
+  }
+  const finalWidth = Math.max(totalWidth, footerW + PAGE_PAD * 2);
+  const footerH = footerLines.length > 0
+    ? FOOTER_GAP + footerLines.length * FOOTER_LINE_H
+    : 0;
+  if (footerLines.length > 0) {
+    let fy = base.height + FOOTER_GAP + FOOTER_FONT;
+    for (const line of footerLines) {
+      shapes.push(
+        ...drawLabelSpans(
+          parseLabelMarkup(line),
+          finalWidth / 2,
+          fy,
+          'middle',
+          'alphabetic',
+          FOOTER_FONT,
+        ).map((s) => recolor(s, COLOR_FOOTER)),
+      );
+      fy += FOOTER_LINE_H;
+    }
+  }
+
   return {
-    width: totalWidth,
-    height: base.height,
+    width: finalWidth,
+    height: base.height + footerH,
     background: '#fff',
     children: shapes,
   };
+}
+
+// Replace the text/line color of a shape produced by `drawLabelSpans`. Used to
+// tint the footer in muted gray while preserving Creole markup formatting
+// (bold/italic/underline/strike spans the helper inserted).
+function recolor(shape: Shape, color: string): Shape {
+  if (shape.type === 'text') {
+    return { ...shape, font: { ...shape.font, color } };
+  }
+  if (shape.type === 'line') {
+    return { ...shape, style: { ...shape.style, stroke: color } };
+  }
+  return shape;
 }
 
 interface BaseResult {
@@ -288,10 +341,61 @@ function selfLoopExtraWidth(
   return Math.max(0, extra - maxBox);
 }
 
+// Inner padding / spacing constants for `labelBlocks` rendering. Match the
+// usecase variant's visual rhythm so the two diagrams look the same when a
+// container box and a usecase node both use this feature.
+const BLOCK_PAD_X = 12;
+const BLOCK_PAD_Y = 8;
+const BLOCK_SEP_H = 8;
+const BLOCK_LINE_H = NAME_FONT * 1.25;
+const BLOCK_MIN_W = 100;
+
+function measureLabelBlocks(blocks: LabelBlock[]): BoxSize {
+  let maxW = 0;
+  let totalH = 0;
+  for (const b of blocks) {
+    if (b.kind === 'text') {
+      for (const ln of b.text.split('\n')) {
+        const w = measureText(ln, NAME_FONT).width;
+        if (w > maxW) maxW = w;
+        totalH += BLOCK_LINE_H;
+      }
+    } else if (b.kind === 'sep-titled') {
+      const w = measureText(b.text, NAME_FONT).width;
+      if (w > maxW) maxW = w;
+      totalH += BLOCK_SEP_H + BLOCK_LINE_H;
+    } else {
+      totalH += BLOCK_SEP_H;
+    }
+  }
+  return {
+    w: Math.max(BLOCK_MIN_W, maxW + BLOCK_PAD_X * 2),
+    h: totalH + BLOCK_PAD_Y * 2,
+  };
+}
+
 function measureNode(node: ContainerNode): BoxSize {
+  if (node.nodeKind === 'map') return measureMap(node);
+  if (node.labelBlocks && node.labelBlocks.length > 0) {
+    const inner = measureLabelBlocks(node.labelBlocks);
+    let w = inner.w;
+    let h = inner.h;
+    if (node.nodeKind === 'folder') h += FOLDER_TAB_H;
+    if (node.nodeKind === 'node') { w += NODE_SHADOW; h += NODE_SHADOW; }
+    if (node.nodeKind === 'database') h += 14;
+    return { w: Math.max(MIN_W, w), h: Math.max(MIN_H, h) };
+  }
   if (node.nodeKind === 'interface') {
-    const labelW = measureText(node.name, NAME_FONT).width;
-    return { w: Math.max(INTERFACE_R * 2, labelW), h: INTERFACE_R * 2 + INTERFACE_LABEL_GAP + NAME_FONT * 1.2 };
+    const lines = node.name.split('\n');
+    let labelW = 0;
+    for (const ln of lines) {
+      const w = measureText(ln, NAME_FONT).width;
+      if (w > labelW) labelW = w;
+    }
+    return {
+      w: Math.max(INTERFACE_R * 2, labelW),
+      h: INTERFACE_R * 2 + INTERFACE_LABEL_GAP + NAME_FONT * 1.2 * lines.length,
+    };
   }
 
   const stereotype = stereotypeFor(node.nodeKind);
@@ -308,12 +412,14 @@ function measureNode(node: ContainerNode): BoxSize {
   if (node.attributes.length > 0) {
     h += 1 + ATTR_LINE_H * node.attributes.length + PAD_Y;
   }
-  if (node.nodeKind === 'folder') h += FOLDER_TAB_H;
+  if (node.nodeKind === 'folder' || node.nodeKind === 'package') h += FOLDER_TAB_H;
   if (node.nodeKind === 'node') {
     w += NODE_SHADOW;
     h += NODE_SHADOW;
   }
   if (node.nodeKind === 'database') h += 6;
+  if (node.nodeKind === 'hexagon') w += 24; // accommodate side wings
+  if (node.nodeKind === 'stack') h += 12; // accommodate stack slivers
   return { w, h: Math.max(MIN_H, h) };
 }
 
@@ -328,8 +434,17 @@ function stereotypeFor(k: ContainerNodeKind): string {
     case 'artifact':  return '«artifact»';
     case 'storage':   return '«storage»';
     case 'queue':     return '«queue»';
+    case 'card':      return '«card»';
+    case 'package':   return '';
+    case 'agent':     return '';
+    case 'action':    return '';
+    case 'process':   return '';
+    case 'hexagon':   return '';
+    case 'stack':     return '';
+    case 'usecase':   return '';
     case 'rectangle': return '';
     case 'object':    return '';
+    case 'map':       return '';
     case 'interface': return '';
   }
 }
@@ -344,15 +459,202 @@ function drawNode(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
     case 'frame':     return drawFrame(node, pos, sz);
     case 'rectangle': return drawRectangle(node, pos, sz);
     case 'object':    return drawObject(node, pos, sz);
+    case 'map':       return drawMap(node, pos, sz);
     case 'component': return drawComponent(node, pos, sz);
     case 'artifact':  return drawArtifact(node, pos, sz);
     case 'storage':   return drawStorage(node, pos, sz);
     case 'queue':     return drawQueue(node, pos, sz);
+    case 'card':      return drawCard(node, pos, sz);
+    case 'usecase':   return drawUsecase(node, pos, sz);
+    // PlantUML's 17 deployment/component shape keywords. The visuals follow
+    // the official PlantUML icons:
+    //   - action / process : rounded pill (action is identical to "process"
+    //     visually but kept as a distinct kind for source round-tripping).
+    //   - agent            : plain rectangle (agent's official icon is a
+    //     thin-bordered rect).
+    //   - hexagon          : six-sided polygon.
+    //   - stack            : three stacked rectangles.
+    //   - package          : rectangle with a small folder-style tab.
+    case 'action':    return drawAction(node, pos, sz);
+    case 'agent':     return drawAgent(node, pos, sz);
+    case 'hexagon':   return drawHexagon(node, pos, sz);
+    case 'process':   return drawAction(node, pos, sz);
+    case 'stack':     return drawStack(node, pos, sz);
+    case 'package':   return drawPackage(node, pos, sz);
   }
+}
+
+/**
+ * Draws a node's container frame (rectangle, rounded rect, folder tab, node
+ * shadow, or database cylinder) and stacks `labelBlocks` text rows / separator
+ * lines inside the inner content area. Used by every container kind whose
+ * declaration carries a `[ multi-line ... ]` payload.
+ */
+type FrameKind =
+  | { kind: 'rect' }
+  | { kind: 'rounded'; rx: number }
+  | { kind: 'folder' }
+  | { kind: 'node' }
+  | { kind: 'database' };
+
+function drawShapeWithLabelBlocks(
+  node: ContainerNode,
+  pos: Position,
+  sz: BoxSize,
+  fill: string,
+  frame: FrameKind,
+): Shape[] {
+  const shapes: Shape[] = [];
+  let innerPos = pos;
+  let innerSz = sz;
+  if (frame.kind === 'folder') {
+    shapes.push({
+      type: 'polygon',
+      points: [
+        [pos.x, pos.y],
+        [pos.x + FOLDER_TAB_W, pos.y],
+        [pos.x + FOLDER_TAB_W + 6, pos.y + FOLDER_TAB_H],
+        [pos.x + sz.w, pos.y + FOLDER_TAB_H],
+        [pos.x + sz.w, pos.y + sz.h],
+        [pos.x, pos.y + sz.h],
+      ],
+      style: { fill, stroke: COLOR_LINE, strokeWidth: 1 },
+    });
+    innerPos = { x: pos.x, y: pos.y + FOLDER_TAB_H };
+    innerSz = { w: sz.w, h: sz.h - FOLDER_TAB_H };
+  } else if (frame.kind === 'node') {
+    const innerW = sz.w - NODE_SHADOW;
+    const innerH = sz.h - NODE_SHADOW;
+    shapes.push({
+      type: 'polygon',
+      points: [
+        [pos.x + NODE_SHADOW, pos.y],
+        [pos.x + sz.w, pos.y],
+        [pos.x + sz.w, pos.y + innerH],
+        [pos.x + sz.w - NODE_SHADOW, pos.y + sz.h],
+        [pos.x + sz.w - NODE_SHADOW, pos.y + NODE_SHADOW],
+        [pos.x + NODE_SHADOW, pos.y + NODE_SHADOW],
+      ],
+      style: { fill: '#e7e7d4', stroke: COLOR_LINE, strokeWidth: 1 },
+    });
+    shapes.push({
+      type: 'rect',
+      x: pos.x, y: pos.y + NODE_SHADOW, w: innerW, h: innerH,
+      style: { fill, stroke: COLOR_LINE, strokeWidth: 1 },
+    });
+    innerPos = { x: pos.x, y: pos.y + NODE_SHADOW };
+    innerSz = { w: innerW, h: innerH };
+  } else if (frame.kind === 'database') {
+    const left = pos.x + 4;
+    const right = pos.x + sz.w - 4;
+    const top = pos.y + 6;
+    const bottom = pos.y + sz.h - 4;
+    const rx = (right - left) / 2;
+    const ry = 5;
+    const midX = (left + right) / 2;
+    shapes.push({
+      type: 'path',
+      d: `M ${left} ${top} L ${left} ${bottom} A ${rx} ${ry} 0 0 0 ${right} ${bottom} L ${right} ${top}`,
+      style: { fill, stroke: COLOR_LINE, strokeWidth: 1 },
+    });
+    shapes.push({
+      type: 'ellipse',
+      cx: midX, cy: top, rx, ry,
+      style: { fill, stroke: COLOR_LINE, strokeWidth: 1 },
+    });
+    innerPos = { x: pos.x, y: pos.y + 14 };
+    innerSz = { w: sz.w, h: sz.h - 14 };
+  } else if (frame.kind === 'rounded') {
+    shapes.push({
+      type: 'rect',
+      x: pos.x, y: pos.y, w: sz.w, h: sz.h,
+      rx: frame.rx, ry: frame.rx,
+      style: { fill, stroke: COLOR_LINE, strokeWidth: 1 },
+    });
+  } else {
+    shapes.push({
+      type: 'rect',
+      x: pos.x, y: pos.y, w: sz.w, h: sz.h,
+      style: { fill, stroke: COLOR_LINE, strokeWidth: 1 },
+    });
+  }
+  shapes.push(...drawLabelBlocks(node.labelBlocks!, innerPos, innerSz));
+  return shapes;
+}
+
+/**
+ * Stack text rows and horizontal separators (`----` solid, `====` double,
+ * `....` dotted, `..title..` titled) inside the given content area. The
+ * usecase-diagram variant lives in `layout/usecase/index.ts`; this is the
+ * container-diagram equivalent (smaller padding, font matches container).
+ */
+function drawLabelBlocks(blocks: LabelBlock[], pos: Position, sz: BoxSize): Shape[] {
+  const shapes: Shape[] = [];
+  const cx = pos.x + sz.w / 2;
+  const innerLeft = pos.x + BLOCK_PAD_X / 2;
+  const innerRight = pos.x + sz.w - BLOCK_PAD_X / 2;
+  let y = pos.y + BLOCK_PAD_Y;
+  for (const b of blocks) {
+    if (b.kind === 'text') {
+      for (const ln of b.text.split('\n')) {
+        shapes.push({
+          type: 'text',
+          x: cx,
+          y: y + BLOCK_LINE_H * 0.8,
+          text: ln,
+          anchor: 'middle',
+          baseline: 'alphabetic',
+          font: { family: FONT_FAMILY, size: NAME_FONT, color: '#000' },
+        });
+        y += BLOCK_LINE_H;
+      }
+    } else if (b.kind === 'sep-solid') {
+      const yLine = y + BLOCK_SEP_H / 2;
+      shapes.push({
+        type: 'line',
+        x1: innerLeft, y1: yLine, x2: innerRight, y2: yLine,
+        style: { stroke: COLOR_LINE, strokeWidth: 1 },
+      });
+      y += BLOCK_SEP_H;
+    } else if (b.kind === 'sep-double') {
+      const yLine = y + BLOCK_SEP_H / 2;
+      shapes.push({
+        type: 'line',
+        x1: innerLeft, y1: yLine, x2: innerRight, y2: yLine,
+        style: { stroke: COLOR_LINE, strokeWidth: 2 },
+      });
+      y += BLOCK_SEP_H;
+    } else if (b.kind === 'sep-dotted') {
+      const yLine = y + BLOCK_SEP_H / 2;
+      shapes.push({
+        type: 'line',
+        x1: innerLeft, y1: yLine, x2: innerRight, y2: yLine,
+        style: { stroke: COLOR_LINE, strokeWidth: 1, strokeDasharray: '2,3' },
+      });
+      y += BLOCK_SEP_H;
+    } else if (b.kind === 'sep-titled') {
+      const yLine = y + BLOCK_SEP_H / 2;
+      shapes.push({
+        type: 'line',
+        x1: innerLeft, y1: yLine, x2: innerRight, y2: yLine,
+        style: { stroke: COLOR_LINE, strokeWidth: 1, strokeDasharray: '2,3' },
+      });
+      shapes.push({
+        type: 'text',
+        x: cx, y: yLine - 2,
+        text: b.text,
+        anchor: 'middle', baseline: 'alphabetic',
+        font: { family: FONT_FAMILY, size: NAME_FONT, color: '#000' },
+      });
+      y += BLOCK_SEP_H + BLOCK_LINE_H;
+    }
+  }
+  return shapes;
 }
 
 function drawArtifact(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
   const fold = 10;
+  const style = bodyStyle(node, COLOR_FILL);
   return [
     {
       type: 'polygon',
@@ -363,7 +665,7 @@ function drawArtifact(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] 
         [pos.x + sz.w, pos.y + sz.h],
         [pos.x, pos.y + sz.h],
       ],
-      style: { fill: COLOR_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
     {
       type: 'polyline',
@@ -372,7 +674,7 @@ function drawArtifact(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] 
         [pos.x + sz.w - fold, pos.y + fold],
         [pos.x + sz.w, pos.y + fold],
       ],
-      style: { fill: 'none', stroke: COLOR_LINE, strokeWidth: 1 },
+      style: { fill: 'none', stroke: style.stroke ?? COLOR_LINE, strokeWidth: 1 },
     },
     ...drawStereotypeAndName(node, pos, sz),
   ];
@@ -384,7 +686,7 @@ function drawStorage(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
       type: 'rect',
       x: pos.x, y: pos.y, w: sz.w, h: sz.h,
       rx: sz.h / 3, ry: sz.h / 3,
-      style: { fill: COLOR_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style: bodyStyle(node, COLOR_FILL),
     },
     ...drawStereotypeAndName(node, pos, sz),
   ];
@@ -397,6 +699,7 @@ function drawQueue(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
   const right = pos.x + sz.w;
   const top = pos.y;
   const bot = pos.y + sz.h;
+  const style = bodyStyle(node, COLOR_FILL);
   return [
     {
       type: 'path',
@@ -405,56 +708,128 @@ function drawQueue(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
         `A ${rx} ${ry} 0 0 1 ${right - rx} ${bot} ` +
         `L ${left + rx} ${bot} ` +
         `A ${rx} ${ry} 0 0 1 ${left + rx} ${top} Z`,
-      style: { fill: COLOR_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
     {
       type: 'path',
       d: `M ${left + rx} ${top} A ${rx} ${ry} 0 0 0 ${left + rx} ${bot}`,
-      style: { fill: 'none', stroke: COLOR_LINE, strokeWidth: 1 },
+      style: { fill: 'none', stroke: style.stroke ?? COLOR_LINE, strokeWidth: 1 },
     },
     ...drawStereotypeAndName(node, pos, sz),
   ];
 }
 
 function drawComponent(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
-  const shapes = drawBoxWithStereotype(node, pos, sz, COLOR_FILL);
+  const fill = node.fill ?? (node.color ? resolveColor(node.color) : COLOR_FILL);
+  const shapes = node.labelBlocks && node.labelBlocks.length > 0
+    ? drawShapeWithLabelBlocks(node, pos, sz, fill, { kind: 'rect' })
+    : drawBoxWithStereotype(node, pos, sz, fill);
   // Small port marks on left/right (decorative)
   const top = pos.y + sz.h * 0.18;
   const bot = pos.y + sz.h * 0.82;
   shapes.push(
-    portRect(pos.x - 3, top),
-    portRect(pos.x - 3, bot),
+    portRect(pos.x - 3, top, fill),
+    portRect(pos.x - 3, bot, fill),
   );
   return shapes;
 }
 
-function portRect(x: number, y: number): Shape {
+// `card` — rounded rectangle. Matches PlantUML's card shape.
+function drawCard(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const style = bodyStyle(node, COLOR_FILL);
+  const rx = 10;
+  if (node.labelBlocks && node.labelBlocks.length > 0) {
+    return drawShapeWithLabelBlocks(node, pos, sz, style.fill ?? COLOR_FILL, { kind: 'rounded', rx });
+  }
+  return [
+    {
+      type: 'rect',
+      x: pos.x, y: pos.y, w: sz.w, h: sz.h,
+      rx, ry: rx,
+      style,
+    },
+    ...drawStereotypeAndName(node, pos, sz),
+  ];
+}
+
+// `usecase` keyword used inside a component/deployment diagram — render as a
+// rounded rectangle (stadium-ish) since the routed parser is component, not
+// the usecase parser proper. Honors `labelBlocks` for multi-line content.
+function drawUsecase(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const style = bodyStyle(node, COLOR_FILL);
+  const rx = Math.min(sz.h / 2, 18);
+  if (node.labelBlocks && node.labelBlocks.length > 0) {
+    return drawShapeWithLabelBlocks(node, pos, sz, style.fill ?? COLOR_FILL, { kind: 'rounded', rx });
+  }
+  return [
+    {
+      type: 'rect',
+      x: pos.x, y: pos.y, w: sz.w, h: sz.h,
+      rx, ry: rx,
+      style,
+    },
+    ...drawStereotypeAndName(node, pos, sz),
+  ];
+}
+
+/**
+ * Resolve a `#Color` token from the source (named CSS color like `Yellow` or
+ * a hex string like `#FF0000`) to a string the renderer's fill accepts. Named
+ * colors pass through as-is (the SVG renderer accepts them via standard CSS
+ * color names). Hex tokens are normalized to a leading `#`.
+ */
+function resolveColor(token: string): string {
+  if (token.startsWith('#')) return token;
+  // PlantUML allows bare hex without a leading `#` (`#FFAA00`). Detect 3/4/6/8
+  // hex digits and prefix `#`; otherwise treat as a named color verbatim.
+  if (/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{4}$|^[0-9a-fA-F]{6}$|^[0-9a-fA-F]{8}$/.test(token)) {
+    return `#${token}`;
+  }
+  return token;
+}
+
+function portRect(x: number, y: number, fill: string = COLOR_FILL): Shape {
   return {
     type: 'rect',
     x, y: y - 4, w: 10, h: 8,
-    style: { fill: COLOR_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+    style: { fill, stroke: COLOR_LINE, strokeWidth: 1 },
   };
 }
 
 function drawInterface(name: string, pos: Position, sz: BoxSize): Shape[] {
   const cx = pos.x + sz.w / 2;
   const cy = pos.y + INTERFACE_R;
-  return [
+  const shapes: Shape[] = [
     {
       type: 'circle',
       cx, cy, r: INTERFACE_R,
       style: { fill: COLOR_INTERFACE_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
     },
-    {
-      type: 'text',
-      x: cx, y: pos.y + sz.h - 2,
-      text: name, anchor: 'middle', baseline: 'alphabetic',
-      font: { family: FONT_FAMILY, size: NAME_FONT, color: '#000' },
-    },
   ];
+  // Render each `\n`-separated row of the display name as its own text line so
+  // multi-line labels like `Last\ninterface` lay out across two rows.
+  const lines = name.split('\n');
+  const lineH = NAME_FONT * 1.2;
+  // Bottom-anchor the last line at `pos.y + sz.h - 2` to preserve single-line
+  // pixel positions for back-compat with goldens.
+  const lastBaseline = pos.y + sz.h - 2;
+  for (let i = 0; i < lines.length; i++) {
+    const baseline = lastBaseline - (lines.length - 1 - i) * lineH;
+    shapes.push({
+      type: 'text',
+      x: cx, y: baseline,
+      text: lines[i]!, anchor: 'middle', baseline: 'alphabetic',
+      font: { family: FONT_FAMILY, size: NAME_FONT, color: '#000' },
+    });
+  }
+  return shapes;
 }
 
 function drawDeploymentNode(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const fill = node.fill ?? (node.color ? resolveColor(node.color) : COLOR_FILL);
+  if (node.labelBlocks && node.labelBlocks.length > 0) {
+    return drawShapeWithLabelBlocks(node, pos, sz, fill, { kind: 'node' });
+  }
   const innerW = sz.w - NODE_SHADOW;
   const innerH = sz.h - NODE_SHADOW;
   const back: Shape[] = [
@@ -471,7 +846,7 @@ function drawDeploymentNode(node: ContainerNode, pos: Position, sz: BoxSize): Sh
       style: { fill: '#e7e7d4', stroke: COLOR_LINE, strokeWidth: 1 },
     },
   ];
-  const front = drawBoxWithStereotype(node, { x: pos.x, y: pos.y + NODE_SHADOW }, { w: innerW, h: innerH }, COLOR_FILL);
+  const front = drawBoxWithStereotype(node, { x: pos.x, y: pos.y + NODE_SHADOW }, { w: innerW, h: innerH }, fill);
   return [...back, ...front];
 }
 
@@ -482,13 +857,17 @@ function drawCloud(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
     {
       type: 'ellipse',
       cx, cy, rx: sz.w / 2, ry: sz.h / 2,
-      style: { fill: COLOR_CLOUD_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style: bodyStyle(node, COLOR_CLOUD_FILL),
     },
     ...drawStereotypeAndName(node, pos, sz),
   ];
 }
 
 function drawDatabase(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const fill = node.fill ?? (node.color ? resolveColor(node.color) : COLOR_DATABASE_FILL);
+  if (node.labelBlocks && node.labelBlocks.length > 0) {
+    return drawShapeWithLabelBlocks(node, pos, sz, fill, { kind: 'database' });
+  }
   const left = pos.x + 4;
   const right = pos.x + sz.w - 4;
   const top = pos.y + 6;
@@ -512,6 +891,10 @@ function drawDatabase(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] 
 }
 
 function drawFolder(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const style = bodyStyle(node, COLOR_FILL);
+  if (node.labelBlocks && node.labelBlocks.length > 0) {
+    return drawShapeWithLabelBlocks(node, pos, sz, style.fill ?? COLOR_FILL, { kind: 'folder' });
+  }
   const bodyY = pos.y + FOLDER_TAB_H;
   const bodyH = sz.h - FOLDER_TAB_H;
   return [
@@ -525,22 +908,30 @@ function drawFolder(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
         [pos.x + sz.w, pos.y + sz.h],
         [pos.x, pos.y + sz.h],
       ],
-      style: { fill: COLOR_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
     ...drawStereotypeAndName(node, { x: pos.x, y: bodyY }, { w: sz.w, h: bodyH }),
   ];
 }
 
 function drawFrame(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
-  return drawBoxWithStereotype(node, pos, sz, COLOR_FILL);
+  const fill = node.fill ?? (node.color ? resolveColor(node.color) : COLOR_FILL);
+  if (node.labelBlocks && node.labelBlocks.length > 0) {
+    return drawShapeWithLabelBlocks(node, pos, sz, fill, { kind: 'rect' });
+  }
+  return drawBoxWithStereotype(node, pos, sz, fill);
 }
 
 function drawRectangle(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const style = bodyStyle(node, COLOR_FILL);
+  if (node.labelBlocks && node.labelBlocks.length > 0) {
+    return drawShapeWithLabelBlocks(node, pos, sz, style.fill ?? COLOR_FILL, { kind: 'rect' });
+  }
   return [
     {
       type: 'rect',
       x: pos.x, y: pos.y, w: sz.w, h: sz.h,
-      style: { fill: COLOR_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
     ...drawStereotypeAndName(node, pos, sz),
   ];
@@ -597,6 +988,128 @@ function drawObject(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
   return shapes;
 }
 
+// `map Name { … }` — header bar plus two-column key/value table. Display name
+// supports Creole markup via `parseLabelMarkup` so `**bold**` in the header
+// renders correctly. Column widths derive from the widest key / widest value.
+const MAP_HEADER_FONT = 13;
+const MAP_CELL_FONT = 12;
+const MAP_HEADER_H = MAP_HEADER_FONT + PAD_Y * 2;
+const MAP_ROW_H = MAP_CELL_FONT + PAD_Y * 2;
+const MAP_CELL_PAD_X = 8;
+const MAP_MIN_COL_W = 50;
+
+interface MapMetrics {
+  headerW: number;
+  keyW: number;
+  valueW: number;
+}
+
+function mapMetrics(node: ContainerNode): MapMetrics {
+  const entries = node.mapEntries ?? [];
+  let keyW = 0;
+  let valueW = 0;
+  for (const e of entries) {
+    keyW = Math.max(keyW, measureText(e.key, MAP_CELL_FONT).width);
+    valueW = Math.max(valueW, measureText(e.value, MAP_CELL_FONT).width);
+  }
+  const headerW = measureSpansWidth(parseLabelMarkup(node.name), MAP_HEADER_FONT);
+  return {
+    headerW,
+    keyW: Math.max(MAP_MIN_COL_W, keyW),
+    valueW: Math.max(MAP_MIN_COL_W, valueW),
+  };
+}
+
+function measureMap(node: ContainerNode): BoxSize {
+  const m = mapMetrics(node);
+  const columnsW = m.keyW + m.valueW + MAP_CELL_PAD_X * 4;
+  const w = Math.max(columnsW, m.headerW + PAD_X * 2);
+  const rows = (node.mapEntries ?? []).length;
+  const h = MAP_HEADER_H + rows * MAP_ROW_H;
+  return { w, h };
+}
+
+function drawMap(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const shapes: Shape[] = [];
+  // Outer frame.
+  shapes.push({
+    type: 'rect',
+    x: pos.x, y: pos.y, w: sz.w, h: sz.h,
+    style: { fill: COLOR_OBJECT_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+  });
+  // Header separator beneath the title bar.
+  const headerBottom = pos.y + MAP_HEADER_H;
+  shapes.push({
+    type: 'line',
+    x1: pos.x, y1: headerBottom, x2: pos.x + sz.w, y2: headerBottom,
+    style: { stroke: COLOR_LINE, strokeWidth: 1 },
+  });
+  // Header label — uses the Creole markup parser so `**bold**`, `//italic//`
+  // etc. inside the quoted display name render with the right styling.
+  const headerCx = pos.x + sz.w / 2;
+  const headerBaseline = pos.y + PAD_Y + MAP_HEADER_FONT * 0.9;
+  shapes.push(
+    ...drawLabelSpans(
+      parseLabelMarkup(node.name),
+      headerCx,
+      headerBaseline,
+      'middle',
+      'alphabetic',
+      MAP_HEADER_FONT,
+    ),
+  );
+
+  const entries = node.mapEntries ?? [];
+  if (entries.length === 0) return shapes;
+
+  // Vertical separator between the key column and the value column. Split the
+  // remaining width proportionally to the widest key vs widest value cell so
+  // narrow keys don't waste space.
+  const m = mapMetrics(node);
+  const totalCells = m.keyW + m.valueW;
+  const keyColW = totalCells > 0 ? (m.keyW / totalCells) * sz.w : sz.w / 2;
+  const dividerX = pos.x + keyColW;
+  shapes.push({
+    type: 'line',
+    x1: dividerX, y1: headerBottom, x2: dividerX, y2: pos.y + sz.h,
+    style: { stroke: COLOR_LINE, strokeWidth: 1 },
+  });
+
+  // Rows + per-row baseline. Skip the trailing separator so the bottom edge of
+  // the outer frame doubles as the last row's bottom line.
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]!;
+    const rowTop = headerBottom + i * MAP_ROW_H;
+    if (i > 0) {
+      shapes.push({
+        type: 'line',
+        x1: pos.x, y1: rowTop, x2: pos.x + sz.w, y2: rowTop,
+        style: { stroke: COLOR_LINE, strokeWidth: 1 },
+      });
+    }
+    const baseline = rowTop + PAD_Y + MAP_CELL_FONT * 0.9;
+    shapes.push({
+      type: 'text',
+      x: pos.x + MAP_CELL_PAD_X,
+      y: baseline,
+      text: e.key,
+      anchor: 'start',
+      baseline: 'alphabetic',
+      font: { family: FONT_FAMILY, size: MAP_CELL_FONT, color: '#000' },
+    });
+    shapes.push({
+      type: 'text',
+      x: dividerX + MAP_CELL_PAD_X,
+      y: baseline,
+      text: e.value,
+      anchor: 'start',
+      baseline: 'alphabetic',
+      font: { family: FONT_FAMILY, size: MAP_CELL_FONT, color: '#000' },
+    });
+  }
+  return shapes;
+}
+
 function drawBoxWithStereotype(
   node: ContainerNode,
   pos: Position,
@@ -607,7 +1120,7 @@ function drawBoxWithStereotype(
     {
       type: 'rect',
       x: pos.x, y: pos.y, w: sz.w, h: sz.h,
-      style: { fill, stroke: COLOR_LINE, strokeWidth: 1 },
+      style: bodyStyle(node, fill),
     },
     ...drawStereotypeAndName(node, pos, sz),
   ];
@@ -616,6 +1129,7 @@ function drawBoxWithStereotype(
 function drawStereotypeAndName(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
   const stereotype = stereotypeFor(node.nodeKind);
   const cx = pos.x + sz.w / 2;
+  const textColor = node.textColor ?? '#000';
   const result: Shape[] = [];
   let textY = pos.y + PAD_Y;
   if (stereotype) {
@@ -624,7 +1138,7 @@ function drawStereotypeAndName(node: ContainerNode, pos: Position, sz: BoxSize):
       type: 'text',
       x: cx, y: textY,
       text: stereotype, anchor: 'middle', baseline: 'alphabetic',
-      font: { family: FONT_FAMILY, size: STEREO_FONT, color: '#000' },
+      font: { family: FONT_FAMILY, size: STEREO_FONT, color: textColor },
     });
     textY += Math.ceil(STEREO_FONT * 0.6);
   }
@@ -632,9 +1146,135 @@ function drawStereotypeAndName(node: ContainerNode, pos: Position, sz: BoxSize):
     type: 'text',
     x: cx, y: textY + NAME_FONT * 1.1,
     text: node.name, anchor: 'middle', baseline: 'alphabetic',
-    font: { family: FONT_FAMILY, size: NAME_FONT, weight: 'bold', color: '#000' },
+    font: { family: FONT_FAMILY, size: NAME_FONT, weight: 'bold', color: textColor },
   });
   return result;
+}
+
+/**
+ * Compute the SVG style for a node body, layering the inline-style overrides
+ * (`fill`, `lineColor`, `lineStyle`) on top of the kind's default. Used by
+ * every shape draw function so styling applies uniformly.
+ */
+function bodyStyle(node: ContainerNode, defaultFill: string): Style {
+  const fill = node.fill ?? (node.color ? resolveColor(node.color) : defaultFill);
+  const stroke = node.lineColor ?? COLOR_LINE;
+  const style: Style = { fill, stroke, strokeWidth: 1 };
+  if (node.lineStyle === 'bold') style.strokeWidth = 2;
+  else if (node.lineStyle === 'dashed') style.strokeDasharray = '4,2';
+  else if (node.lineStyle === 'dotted') style.strokeDasharray = '2,3';
+  return style;
+}
+
+// ─── PlantUML shape draws (action / agent / hexagon / process / stack /
+// package). Each respects the inline `bodyStyle` so colours, line widths and
+// dashed/dotted patterns from the source declaration flow through.
+
+// `action` and `process` — rounded pill (a rectangle with corner radius equal
+// to half the height). Both use the same drawer; the kind is preserved on the
+// node so future per-kind stereotypes can be added.
+function drawAction(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const rx = Math.min(sz.h / 2, 18);
+  return [
+    {
+      type: 'rect',
+      x: pos.x, y: pos.y, w: sz.w, h: sz.h,
+      rx, ry: rx,
+      style: bodyStyle(node, COLOR_FILL),
+    },
+    ...drawStereotypeAndName(node, pos, sz),
+  ];
+}
+
+// `agent` — plain rectangle (thin border per PlantUML's icon). Visually
+// distinct from `rectangle` only by the absence of the `«rectangle»` stereotype
+// (which we already suppress).
+function drawAgent(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  return [
+    {
+      type: 'rect',
+      x: pos.x, y: pos.y, w: sz.w, h: sz.h,
+      style: bodyStyle(node, COLOR_FILL),
+    },
+    ...drawStereotypeAndName(node, pos, sz),
+  ];
+}
+
+// `hexagon` — six-sided polygon. Sides extend horizontally with the two
+// "wing" vertices outside the bounding box's left and right edges; we inset by
+// `wing` so the shape's visual extent matches the measured size.
+function drawHexagon(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const wing = Math.min(sz.h * 0.4, 16);
+  const x = pos.x;
+  const y = pos.y;
+  const w = sz.w;
+  const h = sz.h;
+  return [
+    {
+      type: 'polygon',
+      points: [
+        [x + wing, y],
+        [x + w - wing, y],
+        [x + w, y + h / 2],
+        [x + w - wing, y + h],
+        [x + wing, y + h],
+        [x, y + h / 2],
+      ],
+      style: bodyStyle(node, COLOR_FILL),
+    },
+    ...drawStereotypeAndName(node, pos, sz),
+  ];
+}
+
+// `stack` — three stacked rectangles, the bottom two visible as slim slivers
+// behind the main body to suggest a vertical stack. The name sits on the
+// front-most rectangle.
+function drawStack(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const slot = Math.min(6, sz.h * 0.18);
+  const style = bodyStyle(node, COLOR_FILL);
+  const x = pos.x;
+  const y = pos.y;
+  const w = sz.w;
+  const h = sz.h;
+  return [
+    // Back-most sliver.
+    { type: 'rect', x: x + slot * 2, y, w: w - slot * 2, h: slot, style },
+    // Middle sliver.
+    { type: 'rect', x: x + slot, y: y + slot, w: w - slot, h: slot, style },
+    // Front rectangle holds the label.
+    { type: 'rect', x, y: y + slot * 2, w, h: h - slot * 2, style },
+    ...drawStereotypeAndName(
+      node,
+      { x, y: y + slot * 2 },
+      { w, h: h - slot * 2 },
+    ),
+  ];
+}
+
+// `package` — rectangle with a small folder-style tab spanning a portion of
+// the top edge. Visually similar to `folder` but with a narrower tab.
+function drawPackage(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
+  const tabW = Math.min(60, sz.w * 0.4);
+  const tabH = 10;
+  return [
+    {
+      type: 'polygon',
+      points: [
+        [pos.x, pos.y],
+        [pos.x + tabW, pos.y],
+        [pos.x + tabW + 6, pos.y + tabH],
+        [pos.x + sz.w, pos.y + tabH],
+        [pos.x + sz.w, pos.y + sz.h],
+        [pos.x, pos.y + sz.h],
+      ],
+      style: bodyStyle(node, COLOR_FILL),
+    },
+    ...drawStereotypeAndName(
+      node,
+      { x: pos.x, y: pos.y + tabH },
+      { w: sz.w, h: sz.h - tabH },
+    ),
+  ];
 }
 
 function emptyScene(kind: ContainerAst['kind']): Scene {

@@ -10,6 +10,11 @@ import { measureText } from '../sequence/measure.js';
 import { drawMarker, markerLength, shortenPolyline, type Vec } from '../class/markers.js';
 import { assignLayers, buildLayoutEdges, removeCycles } from '../class/sugiyama.js';
 import { computeLateralOffsets } from '../common/edges.js';
+import {
+  parseLabelMarkup,
+  drawLabelSpans,
+  measureSpansWidth,
+} from '../sequence/markup.js';
 
 const PAGE_PAD = 16;
 const TITLE_FONT = 16;
@@ -27,6 +32,10 @@ const FONT_LABEL_EDGE = 11;
 const COLOR_LINE = '#222';
 const COLOR_EDGE = '#444';
 const COLOR_LEAF_FILL = '#fefece';
+const FOOTER_FONT = 12;
+const FOOTER_LINE_H = 16;
+const FOOTER_GAP = 12;
+const COLOR_FOOTER = '#888';
 
 interface AbsPos {
   x: number;
@@ -109,12 +118,50 @@ export function layoutNested(ast: ContainerAst): Scene {
     );
   }
 
+  // `footer <text>` — render at bottom-center with shared Creole markup.
+  const footerLines = ast.footer ? ast.footer.split('\n') : [];
+  let footerW = 0;
+  for (const line of footerLines) {
+    const w = measureSpansWidth(parseLabelMarkup(line), FOOTER_FONT);
+    if (w > footerW) footerW = w;
+  }
+  const finalW = Math.max(totalW, footerW + PAGE_PAD * 2);
+  const footerH = footerLines.length > 0
+    ? FOOTER_GAP + footerLines.length * FOOTER_LINE_H
+    : 0;
+  if (footerLines.length > 0) {
+    let fy = totalH + FOOTER_GAP + FOOTER_FONT;
+    for (const line of footerLines) {
+      shapes.push(
+        ...drawLabelSpans(
+          parseLabelMarkup(line),
+          finalW / 2,
+          fy,
+          'middle',
+          'alphabetic',
+          FOOTER_FONT,
+        ).map((s) => recolor(s, COLOR_FOOTER)),
+      );
+      fy += FOOTER_LINE_H;
+    }
+  }
+
   return {
-    width: totalW,
-    height: totalH,
+    width: finalW,
+    height: totalH + footerH,
     background: '#fff',
     children: shapes,
   };
+}
+
+function recolor(shape: Shape, color: string): Shape {
+  if (shape.type === 'text') {
+    return { ...shape, font: { ...shape.font, color } };
+  }
+  if (shape.type === 'line') {
+    return { ...shape, style: { ...shape.style, stroke: color } };
+  }
+  return shape;
 }
 
 function buildParentMap(ast: ContainerAst): Map<string, string | null> {
@@ -435,6 +482,21 @@ function drawLeaf(node: ContainerNode, x: number, y: number, w: number, h: numbe
     case 'frame':      return drawFrame(node, x, y, w, h);
     case 'rectangle':  return drawRect(node, x, y, w, h);
     case 'object':     return drawRect(node, x, y, w, h);
+    case 'card':       return drawRect(node, x, y, w, h);
+    case 'usecase':    return drawRect(node, x, y, w, h);
+    // `map` is rare inside a containing frame, but if it appears we fall back
+    // to a plain rect so the surrounding layout still computes.
+    case 'map':        return drawRect(node, x, y, w, h);
+    // New PlantUML shape kinds. When they appear as a leaf inside another
+    // container we fall back to plain rectangles for now (the top-level
+    // layout in `index.ts` provides the characteristic icon). Keeps the
+    // switch exhaustive so TS catches a forgotten new kind at compile time.
+    case 'action':
+    case 'agent':
+    case 'hexagon':
+    case 'process':
+    case 'stack':
+    case 'package':    return drawRect(node, x, y, w, h);
   }
 }
 
@@ -448,11 +510,13 @@ function drawContainerFrame(
 ): Shape[] {
   const kind = node.nodeKind;
   const shapes: Shape[] = [];
+  const style = frameStyle(node);
 
   switch (kind) {
     case 'cloud': {
-      shapes.push(drawCloudPath(x, y, w, h));
-      shapes.push(centeredTitle(headerText, x + w / 2, y + 16));
+      const cloud = drawCloudPath(x, y, w, h) as Extract<Shape, { type: 'path' }>;
+      shapes.push({ type: 'path', d: cloud.d, style });
+      shapes.push(centeredTitle(headerText, x + w / 2, y + 16, node.textColor));
       break;
     }
     case 'node': {
@@ -467,17 +531,18 @@ function drawContainerFrame(
           [x + w, y],
           [x + shadow, y],
         ],
-        style: { fill: '#fff', stroke: COLOR_LINE, strokeWidth: 1 },
+        style,
       });
       shapes.push({
         type: 'rect',
         x, y, w, h,
-        style: { fill: '#fff', stroke: COLOR_LINE, strokeWidth: 1 },
+        style,
       });
-      shapes.push(centeredTitle(headerText, x + w / 2, y + 16));
+      shapes.push(centeredTitle(headerText, x + w / 2, y + 16, node.textColor));
       break;
     }
-    case 'folder': {
+    case 'folder':
+    case 'package': {
       const tabW = Math.min(80, w / 3);
       shapes.push({
         type: 'polygon',
@@ -489,20 +554,118 @@ function drawContainerFrame(
           [x + w, y + h],
           [x, y + h],
         ],
-        style: { fill: '#fff', stroke: COLOR_LINE, strokeWidth: 1 },
+        style,
       });
-      shapes.push(cornerTitle(headerText, x + 6, y + 6));
+      shapes.push(cornerTitle(headerText, x + 6, y + 6, node.textColor));
+      break;
+    }
+    case 'hexagon': {
+      const wing = Math.min(h * 0.4, 16);
+      shapes.push({
+        type: 'polygon',
+        points: [
+          [x + wing, y],
+          [x + w - wing, y],
+          [x + w, y + h / 2],
+          [x + w - wing, y + h],
+          [x + wing, y + h],
+          [x, y + h / 2],
+        ],
+        style,
+      });
+      shapes.push(centeredTitle(headerText, x + w / 2, y + 16, node.textColor));
+      break;
+    }
+    case 'stack': {
+      const slot = Math.min(6, h * 0.12);
+      shapes.push({ type: 'rect', x: x + slot * 2, y, w: w - slot * 2, h: slot, style });
+      shapes.push({ type: 'rect', x: x + slot, y: y + slot, w: w - slot, h: slot, style });
+      shapes.push({
+        type: 'rect',
+        x, y: y + slot * 2, w, h: h - slot * 2,
+        style,
+      });
+      shapes.push(cornerTitle(headerText, x + 10, y + slot * 2 + 14, node.textColor));
+      break;
+    }
+    case 'database': {
+      // Cylinder container — same silhouette as the leaf cylinder, with the
+      // title centered along the top "rim". Children are placed inside the
+      // body (the nested layout already pads for HEADER_H).
+      const left = x + 4;
+      const right = x + w - 4;
+      const top = y + 6;
+      const bottom = y + h - 4;
+      const rx = (right - left) / 2;
+      const ry = 5;
+      const midX = (left + right) / 2;
+      shapes.push({
+        type: 'path',
+        d: `M ${left} ${top} L ${left} ${bottom} A ${rx} ${ry} 0 0 0 ${right} ${bottom} L ${right} ${top}`,
+        style,
+      });
+      shapes.push({
+        type: 'ellipse',
+        cx: midX, cy: top, rx, ry,
+        style,
+      });
+      shapes.push(centeredTitle(headerText, x + w / 2, y + 22, node.textColor));
+      break;
+    }
+    case 'artifact': {
+      const fold = 10;
+      shapes.push({
+        type: 'polygon',
+        points: [
+          [x, y],
+          [x + w - fold, y],
+          [x + w, y + fold],
+          [x + w, y + h],
+          [x, y + h],
+        ],
+        style,
+      });
+      shapes.push({
+        type: 'polyline',
+        points: [
+          [x + w - fold, y],
+          [x + w - fold, y + fold],
+          [x + w, y + fold],
+        ],
+        style: { fill: 'none', stroke: style.stroke ?? COLOR_LINE, strokeWidth: 1 },
+      });
+      shapes.push(cornerTitle(headerText, x + 10, y + 14, node.textColor));
+      break;
+    }
+    case 'storage':
+    case 'card':
+    case 'action':
+    case 'process':
+    case 'usecase': {
+      // Rounded rectangle frame for stadium-ish shapes.
+      shapes.push({
+        type: 'rect',
+        x, y, w, h, rx: 10, ry: 10,
+        style,
+      });
+      shapes.push(cornerTitle(headerText, x + 10, y + 14, node.textColor));
       break;
     }
     case 'frame':
     case 'rectangle':
+    case 'agent':
+    case 'component':
+    case 'queue':
+    case 'object':
+    case 'map':
+    case 'interface':
     default: {
       shapes.push({
         type: 'rect',
         x, y, w, h,
-        style: { fill: '#fff', stroke: COLOR_LINE, strokeWidth: 1 },
+        style,
       });
-      shapes.push(cornerTitle(headerText, x + 10, y + 14));
+      shapes.push(cornerTitle(headerText, x + 10, y + 14, node.textColor));
       break;
     }
   }
@@ -510,7 +673,23 @@ function drawContainerFrame(
   return shapes;
 }
 
-function centeredTitle(text: string, cx: number, y: number): Shape {
+/**
+ * Frame style for a container with children — composites the inline-style
+ * fields (`fill`, `lineColor`, `lineStyle`) onto the default frame look
+ * (white fill, thin dark stroke). Matches the leaf-shape `bodyStyle` so
+ * nested and leaf draws stay visually consistent for the same node.
+ */
+function frameStyle(node: ContainerNode): Style {
+  const fill = node.fill ?? '#fff';
+  const stroke = node.lineColor ?? COLOR_LINE;
+  const style: Style = { fill, stroke, strokeWidth: 1 };
+  if (node.lineStyle === 'bold') style.strokeWidth = 2;
+  else if (node.lineStyle === 'dashed') style.strokeDasharray = '4,2';
+  else if (node.lineStyle === 'dotted') style.strokeDasharray = '2,3';
+  return style;
+}
+
+function centeredTitle(text: string, cx: number, y: number, color?: string): Shape {
   return {
     type: 'text',
     x: cx,
@@ -518,11 +697,11 @@ function centeredTitle(text: string, cx: number, y: number): Shape {
     text,
     anchor: 'middle',
     baseline: 'alphabetic',
-    font: { family: FONT_FAMILY, size: FONT_NAME, weight: 'bold', color: '#111' },
+    font: { family: FONT_FAMILY, size: FONT_NAME, weight: 'bold', color: color ?? '#111' },
   };
 }
 
-function cornerTitle(text: string, x: number, y: number): Shape {
+function cornerTitle(text: string, x: number, y: number, color?: string): Shape {
   return {
     type: 'text',
     x,
@@ -530,7 +709,7 @@ function cornerTitle(text: string, x: number, y: number): Shape {
     text,
     anchor: 'start',
     baseline: 'alphabetic',
-    font: { family: FONT_FAMILY, size: FONT_NAME, weight: 'bold', color: '#111' },
+    font: { family: FONT_FAMILY, size: FONT_NAME, weight: 'bold', color: color ?? '#111' },
   };
 }
 
@@ -593,28 +772,30 @@ function drawInterface(name: string, x: number, y: number, w: number, h: number)
 }
 
 function drawComponent(node: ContainerNode, x: number, y: number, w: number, h: number): Shape[] {
+  const style = leafBodyStyle(node, COLOR_LEAF_FILL);
   return [
     {
       type: 'rect',
       x, y, w, h,
-      style: { fill: COLOR_LEAF_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
-    portRect(x - 3, y + h * 0.25),
-    portRect(x - 3, y + h * 0.75),
+    portRect(x - 3, y + h * 0.25, style.fill ?? COLOR_LEAF_FILL),
+    portRect(x - 3, y + h * 0.75, style.fill ?? COLOR_LEAF_FILL),
     ...drawCenteredStereo(node, '', x, y, w, h),
   ];
 }
 
-function portRect(x: number, y: number): Shape {
+function portRect(x: number, y: number, fill: string = COLOR_LEAF_FILL): Shape {
   return {
     type: 'rect',
     x, y: y - 4, w: 10, h: 8,
-    style: { fill: COLOR_LEAF_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+    style: { fill, stroke: COLOR_LINE, strokeWidth: 1 },
   };
 }
 
 function drawDeploymentNode(node: ContainerNode, x: number, y: number, w: number, h: number): Shape[] {
   const shadow = 5;
+  const style = leafBodyStyle(node, COLOR_LEAF_FILL);
   return [
     {
       type: 'polygon',
@@ -626,12 +807,12 @@ function drawDeploymentNode(node: ContainerNode, x: number, y: number, w: number
         [x + w, y],
         [x + shadow, y],
       ],
-      style: { fill: '#e7e7d4', stroke: COLOR_LINE, strokeWidth: 1 },
+      style: { fill: '#e7e7d4', stroke: style.stroke ?? COLOR_LINE, strokeWidth: 1 },
     },
     {
       type: 'rect',
       x, y, w, h,
-      style: { fill: COLOR_LEAF_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
     ...drawCenteredStereo(node, '', x, y, w, h),
   ];
@@ -642,7 +823,7 @@ function drawCloud(node: ContainerNode, x: number, y: number, w: number, h: numb
     {
       type: 'ellipse',
       cx: x + w / 2, cy: y + h / 2, rx: w / 2, ry: h / 2,
-      style: { fill: '#f4f6fb', stroke: COLOR_LINE, strokeWidth: 1 },
+      style: leafBodyStyle(node, '#f4f6fb'),
     },
     ...drawCenteredStereo(node, '', x, y, w, h),
   ];
@@ -656,16 +837,17 @@ function drawDatabase(node: ContainerNode, x: number, y: number, w: number, h: n
   const rx = (right - left) / 2;
   const ry = 5;
   const midX = (left + right) / 2;
+  const style = leafBodyStyle(node, '#f4f6fb');
   return [
     {
       type: 'path',
       d: `M ${left} ${top} L ${left} ${bottom} A ${rx} ${ry} 0 0 0 ${right} ${bottom} L ${right} ${top}`,
-      style: { fill: '#f4f6fb', stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
     {
       type: 'ellipse',
       cx: midX, cy: top, rx, ry,
-      style: { fill: '#f4f6fb', stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
     ...drawCenteredStereo(node, '', x, y + 6, w, h - 6),
   ];
@@ -677,7 +859,7 @@ function drawStorage(node: ContainerNode, x: number, y: number, w: number, h: nu
       type: 'rect',
       x, y, w, h,
       rx: h / 3, ry: h / 3,
-      style: { fill: COLOR_LEAF_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style: leafBodyStyle(node, COLOR_LEAF_FILL),
     },
     ...drawCenteredStereo(node, '', x, y, w, h),
   ];
@@ -690,6 +872,7 @@ function drawQueue(node: ContainerNode, x: number, y: number, w: number, h: numb
   const right = x + w;
   const top = y;
   const bot = y + h;
+  const style = leafBodyStyle(node, COLOR_LEAF_FILL);
   return [
     {
       type: 'path',
@@ -698,12 +881,12 @@ function drawQueue(node: ContainerNode, x: number, y: number, w: number, h: numb
         `A ${rx} ${ry} 0 0 1 ${right - rx} ${bot} ` +
         `L ${left + rx} ${bot} ` +
         `A ${rx} ${ry} 0 0 1 ${left + rx} ${top} Z`,
-      style: { fill: COLOR_LEAF_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
     {
       type: 'path',
       d: `M ${left + rx} ${top} A ${rx} ${ry} 0 0 0 ${left + rx} ${bot}`,
-      style: { fill: 'none', stroke: COLOR_LINE, strokeWidth: 1 },
+      style: { fill: 'none', stroke: style.stroke ?? COLOR_LINE, strokeWidth: 1 },
     },
     ...drawCenteredStereo(node, '', x, y, w, h),
   ];
@@ -711,6 +894,7 @@ function drawQueue(node: ContainerNode, x: number, y: number, w: number, h: numb
 
 function drawArtifact(node: ContainerNode, x: number, y: number, w: number, h: number): Shape[] {
   const fold = 10;
+  const style = leafBodyStyle(node, COLOR_LEAF_FILL);
   return [
     {
       type: 'polygon',
@@ -721,7 +905,7 @@ function drawArtifact(node: ContainerNode, x: number, y: number, w: number, h: n
         [x + w, y + h],
         [x, y + h],
       ],
-      style: { fill: COLOR_LEAF_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style,
     },
     {
       type: 'polyline',
@@ -730,7 +914,7 @@ function drawArtifact(node: ContainerNode, x: number, y: number, w: number, h: n
         [x + w - fold, y + fold],
         [x + w, y + fold],
       ],
-      style: { fill: 'none', stroke: COLOR_LINE, strokeWidth: 1 },
+      style: { fill: 'none', stroke: style.stroke ?? COLOR_LINE, strokeWidth: 1 },
     },
     ...drawCenteredStereo(node, '', x, y, w, h),
   ];
@@ -750,7 +934,7 @@ function drawFolder(node: ContainerNode, x: number, y: number, w: number, h: num
         [x + w, y + h],
         [x, y + h],
       ],
-      style: { fill: COLOR_LEAF_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style: leafBodyStyle(node, COLOR_LEAF_FILL),
     },
     ...drawCenteredStereo(node, '', x, y + tabH, w, h - tabH),
   ];
@@ -761,7 +945,7 @@ function drawFrame(node: ContainerNode, x: number, y: number, w: number, h: numb
     {
       type: 'rect',
       x, y, w, h,
-      style: { fill: COLOR_LEAF_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style: leafBodyStyle(node, COLOR_LEAF_FILL),
     },
     ...drawCenteredStereo(node, '', x, y, w, h),
   ];
@@ -772,10 +956,35 @@ function drawRect(node: ContainerNode, x: number, y: number, w: number, h: numbe
     {
       type: 'rect',
       x, y, w, h,
-      style: { fill: COLOR_LEAF_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
+      style: leafBodyStyle(node, COLOR_LEAF_FILL),
     },
     ...drawCenteredStereo(node, '', x, y, w, h),
   ];
+}
+
+/**
+ * Compose the SVG body style for a leaf-drawer call, layering the inline
+ * styling fields (`fill`, `lineColor`, `lineStyle`) onto a kind-specific
+ * default. Mirrors `bodyStyle` in `container/index.ts` so the same node
+ * declaration looks identical in both the leaf and the nested-container
+ * rendering paths.
+ */
+function leafBodyStyle(node: ContainerNode, defaultFill: string): Style {
+  const fill = node.fill ?? (node.color ? resolveLeafColor(node.color) : defaultFill);
+  const stroke = node.lineColor ?? COLOR_LINE;
+  const style: Style = { fill, stroke, strokeWidth: 1 };
+  if (node.lineStyle === 'bold') style.strokeWidth = 2;
+  else if (node.lineStyle === 'dashed') style.strokeDasharray = '4,2';
+  else if (node.lineStyle === 'dotted') style.strokeDasharray = '2,3';
+  return style;
+}
+
+function resolveLeafColor(token: string): string {
+  if (token.startsWith('#')) return token;
+  if (/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{4}$|^[0-9a-fA-F]{6}$|^[0-9a-fA-F]{8}$/.test(token)) {
+    return `#${token}`;
+  }
+  return token;
 }
 
 function drawCenteredStereo(
@@ -787,6 +996,7 @@ function drawCenteredStereo(
   _h: number,
 ): Shape[] {
   const shapes: Shape[] = [];
+  const textColor = node.textColor ?? '#000';
   let textY = y + 8;
   if (stereo) {
     textY += STEREO_FONT * 0.9;
@@ -794,15 +1004,15 @@ function drawCenteredStereo(
       type: 'text',
       x: x + w / 2, y: textY,
       text: stereo, anchor: 'middle', baseline: 'alphabetic',
-      font: { family: FONT_FAMILY, size: STEREO_FONT, color: '#000' },
+      font: { family: FONT_FAMILY, size: STEREO_FONT, color: textColor },
     });
     textY += STEREO_FONT * 0.6;
   }
-  shapes.push(...drawMultilineName(node.name, x + w / 2, textY + FONT_NAME * 0.9, w));
+  shapes.push(...drawMultilineName(node.name, x + w / 2, textY + FONT_NAME * 0.9, w, textColor));
   return shapes;
 }
 
-function drawMultilineName(name: string, cx: number, baseY: number, _w: number): Shape[] {
+function drawMultilineName(name: string, cx: number, baseY: number, _w: number, color: string = '#000'): Shape[] {
   const lines = name.split(/\\n|\r\n|\n/);
   const lineH = FONT_NAME * 1.25;
   return lines.map((line, i) => ({
@@ -812,7 +1022,7 @@ function drawMultilineName(name: string, cx: number, baseY: number, _w: number):
     text: line,
     anchor: 'middle',
     baseline: 'alphabetic',
-    font: { family: FONT_FAMILY, size: FONT_NAME, weight: 'bold', color: '#000' },
+    font: { family: FONT_FAMILY, size: FONT_NAME, weight: 'bold', color },
   }));
 }
 
@@ -827,9 +1037,18 @@ function stereotypeFor(k: ContainerNodeKind): string {
     case 'artifact':  return '«artifact»';
     case 'storage':   return '«storage»';
     case 'queue':     return '«queue»';
+    case 'card':      return '«card»';
     case 'rectangle':
     case 'object':
     case 'interface':
+    case 'usecase':
+    case 'action':
+    case 'agent':
+    case 'hexagon':
+    case 'process':
+    case 'stack':
+    case 'package':
+    case 'map':
     default:          return '';
   }
 }

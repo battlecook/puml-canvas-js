@@ -75,6 +75,15 @@ const EDGE_STYLE: EdgeStyle = {
   labelFontSize: EDGE_LABEL_FONT,
 };
 
+// Header-corner glyphs for class-level visibility markers (e.g. `-class Foo`).
+// `none` is unused — visibility is only drawn when explicitly set on the AST.
+const VISIBILITY_GLYPH: Record<string, string> = {
+  public: '+',
+  private: '-',
+  protected: '#',
+  package: '~',
+};
+
 export function layoutClass(ast: ClassAst): Scene {
   if (ast.classes.length === 0) {
     return {
@@ -105,11 +114,13 @@ export function layoutClass(ast: ClassAst): Scene {
 
   const shapes: Shape[] = [];
 
+  const direction: 'TB' | 'LR' = ast.direction === 'LR' ? 'LR' : 'TB';
+
   const positions = nonLoops.length === 0 ? null : null;
   const base =
     nonLoops.length === 0
       ? layoutGridResult(ast, sizes, titleHeight)
-      : layoutLayeredResult(ast, sizes, titleHeight, nonLoops);
+      : layoutLayeredResult(ast, sizes, titleHeight, nonLoops, direction);
 
   const extraRight = selfLoopExtraWidth(selfLoops, base.positions, sizes);
   const totalWidth = base.width + extraRight;
@@ -180,8 +191,9 @@ function layoutLayeredResult(
   sizes: Map<string, BoxSize>,
   titleHeight: number,
   rels: ClassRelationship[],
+  direction: 'TB' | 'LR',
 ): BaseLayoutResult {
-  const layered = layoutLayered(ast, sizes, titleHeight, rels);
+  const layered = layoutLayered(ast, sizes, titleHeight, rels, direction);
   return {
     positions: layered.positions,
     width: layered.width,
@@ -292,6 +304,7 @@ function layoutLayered(
   sizes: Map<string, BoxSize>,
   titleHeight: number,
   relationships: ClassRelationship[],
+  direction: 'TB' | 'LR' = 'TB',
 ): LayeredResult {
   const nodeIds = ast.classes.map((c) => c.id);
   const edges = buildLayoutEdges(relationships);
@@ -302,53 +315,83 @@ function layoutLayered(
   const initialGroups = groupByLayer(dummy.extendedNodeIds, dummy.layers);
   const ordered = minimizeCrossings(initialGroups, dummy.segments);
 
-  const layerHeights = ordered.map((layer) => {
-    let h = 0;
+  // In LR mode the rank axis runs left-to-right, so each rank is a column and
+  // the per-rank extent is the column's WIDTH (max node width). In TB mode it
+  // runs top-to-bottom, so each rank is a row and the per-rank extent is the
+  // row's HEIGHT (max node height). Mirrors the usecase layered implementation.
+  const lr = direction === 'LR';
+  const rankExtent = ordered.map((layer) => {
+    let v = 0;
     for (const id of layer) {
       if (dummy.dummyIds.has(id)) continue;
-      h = Math.max(h, sizes.get(id)!.h);
+      const sz = sizes.get(id)!;
+      const ext = lr ? sz.w : sz.h;
+      if (ext > v) v = ext;
     }
-    return h;
+    return v;
   });
 
+  // In LR mode the within-layer axis is vertical, so widthOf becomes the
+  // per-node HEIGHT (nodes stack vertically within a column).
   const coords = assignCoordinates({
     orderedLayers: ordered,
     segments: dummy.segments,
-    widthOf: (id) => sizes.get(id)?.w ?? 0,
+    widthOf: (id) => {
+      const sz = sizes.get(id);
+      if (!sz) return 0;
+      return lr ? sz.h : sz.w;
+    },
     dummyIds: dummy.dummyIds,
     horizontalGap: HORIZONTAL_GAP,
     dummyGap: DUMMY_GAP,
   });
-  const maxW = coords.maxLayerWidth > 0 ? coords.maxLayerWidth : MIN_BOX_W;
-  const totalW = maxW + PAGE_PAD * 2;
+  const maxInLayer = coords.maxLayerWidth > 0 ? coords.maxLayerWidth : MIN_BOX_W;
 
   const positions = new Map<string, Position>();
   const centers = new Map<string, NodeCenter>();
 
-  let cursorY = PAGE_PAD + titleHeight;
+  // `rankCursor` walks along the rank axis (Y for TB, X for LR).
+  let rankCursor = PAGE_PAD + titleHeight;
   for (let l = 0; l < ordered.length; l++) {
     const layer = ordered[l]!;
-    const layerH = layerHeights[l]!;
+    const extent = rankExtent[l]!;
     for (const id of layer) {
-      const cx = PAGE_PAD + coords.centerX.get(id)!;
+      const inLayer = PAGE_PAD + coords.centerX.get(id)!;
       const isDummy = dummy.dummyIds.has(id);
-      if (isDummy) {
-        centers.set(id, { cx, cy: cursorY + layerH / 2 });
+      if (lr) {
+        // LR: rank axis is X, within-layer axis is Y.
+        const cx = rankCursor + extent / 2;
+        const cy = inLayer;
+        if (isDummy) {
+          centers.set(id, { cx, cy });
+        } else {
+          const sz = sizes.get(id)!;
+          positions.set(id, { x: rankCursor + (extent - sz.w) / 2, y: cy - sz.h / 2 });
+          centers.set(id, { cx: rankCursor + extent / 2, cy });
+        }
       } else {
-        const sz = sizes.get(id)!;
-        positions.set(id, { x: cx - sz.w / 2, y: cursorY });
-        centers.set(id, { cx, cy: cursorY + sz.h / 2 });
+        const cx = inLayer;
+        const cy = rankCursor + extent / 2;
+        if (isDummy) {
+          centers.set(id, { cx, cy });
+        } else {
+          const sz = sizes.get(id)!;
+          positions.set(id, { x: cx - sz.w / 2, y: rankCursor });
+          centers.set(id, { cx, cy: rankCursor + sz.h / 2 });
+        }
       }
     }
-    cursorY += layerH + LAYER_GAP;
+    rankCursor += extent + LAYER_GAP;
   }
 
+  const rankSpan = rankCursor - LAYER_GAP + PAGE_PAD;
+  const inLayerSpan = maxInLayer + PAGE_PAD * 2;
   return {
     positions,
     centers,
     drawable: dummy.drawable,
-    width: totalW,
-    height: cursorY - LAYER_GAP + PAGE_PAD,
+    width: lr ? rankSpan : inLayerSpan,
+    height: lr ? inLayerSpan : rankSpan,
   };
 }
 
@@ -452,14 +495,57 @@ function drawClassBox(c: ClassDecl, x: number, y: number, sz: BoxSize, compact: 
   const stereoLine = computeStereotypeLine(c);
   const stereoH = stereoLine ? Math.ceil(FONT_STEREO * 1.2) : 0;
   const titleH = BOX_PAD_Y + stereoH + Math.ceil(FONT_NAME * 1.2) + BOX_PAD_Y;
-  const bg = bgFor(c.classKind);
+  const bg = c.fill ?? bgFor(c.classKind);
+  const stroke = c.borderColor ?? COLOR_LINE;
+  // `bold` → thicker stroke; `dashed` / `dotted` → strokeDasharray patterns.
+  // `solid` (default) leaves both unset. Note: gradient fills are not rendered
+  // (SVG gradients aren't trivially expressible in the Style shape) — we fall
+  // back to the first color stored in `fill`.
+  const strokeWidth = c.borderStyle === 'bold' ? 2 : 1;
+  const strokeDasharray =
+    c.borderStyle === 'dashed' ? '4,2' : c.borderStyle === 'dotted' ? '2,3' : undefined;
   const shapes: Shape[] = [];
 
+  const boxStyle: { fill: string; stroke: string; strokeWidth: number; strokeDasharray?: string } = {
+    fill: bg,
+    stroke,
+    strokeWidth,
+  };
+  if (strokeDasharray) boxStyle.strokeDasharray = strokeDasharray;
   shapes.push({
     type: 'rect',
     x, y, w: sz.w, h: sz.h,
-    style: { fill: bg, stroke: COLOR_LINE, strokeWidth: 1 },
+    style: boxStyle,
   });
+
+  // Inline `header:<color>` style fills the top strip (over the name +
+  // stereotype area) before the body separator. Gradients fall back to the
+  // first stop.
+  if (c.headerFill) {
+    shapes.push({
+      type: 'rect',
+      x, y, w: sz.w, h: titleH,
+      style: { fill: c.headerFill, stroke: stroke, strokeWidth },
+    });
+  }
+
+  // Class-level visibility marker (set by `-class Foo` / `#class Foo` etc.).
+  // Drawn as a small glyph in the top-left corner of the header so the
+  // existing centered name/stereotype layout is undisturbed.
+  if (c.visibility && c.visibility !== 'none') {
+    const glyph = VISIBILITY_GLYPH[c.visibility];
+    if (glyph) {
+      shapes.push({
+        type: 'text',
+        x: x + BOX_PAD_X,
+        y: y + BOX_PAD_Y + Math.ceil(FONT_STEREO * 0.9),
+        text: glyph,
+        anchor: 'start',
+        baseline: 'alphabetic',
+        font: { family: FONT_FAMILY, size: FONT_STEREO, weight: 'bold', color: '#000' },
+      });
+    }
+  }
 
   let textY = y + BOX_PAD_Y + Math.ceil(FONT_STEREO * 0.9);
   if (stereoLine) {

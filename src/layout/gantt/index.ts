@@ -13,6 +13,9 @@ const ROW_HEIGHT = 26;
 const LABEL_W_MIN = 140;
 const LABEL_PAD_X = 10;
 const BAR_PAD_Y = 4;
+const SECTION_HEIGHT = 22;
+const COLOR_SECTION_FILL = '#eaeaea';
+const COLOR_SECTION_TEXT = '#333';
 const FONT_FAMILY = 'sans-serif';
 const FONT_LABEL = 12;
 const FONT_HEADER = 11;
@@ -57,19 +60,27 @@ interface PlannedTask {
 }
 
 export function layoutGantt(ast: GanttAst): Scene {
-  if (ast.tasks.length === 0 || !ast.startDate) {
+  if (ast.tasks.length === 0) {
     return emptyScene();
   }
 
-  const closed = new Set<WeekdayName>(ast.closedDays);
-  const startDate = parseDate(ast.startDate);
+  // When `Project starts <date>` is omitted, render an abstract day axis
+  // (1, 2, 3 ...) rather than a calendar. Closed-day handling is skipped
+  // because we have no real weekdays to map to.
+  const hasStartDate = !!ast.startDate;
+  const closed = new Set<WeekdayName>(hasStartDate ? ast.closedDays : []);
+  const startDate = hasStartDate ? parseDate(ast.startDate) : new Date(Date.UTC(2000, 0, 1));
   const startMs = startDate.getTime();
 
   const planned = new Map<string, PlannedTask>();
   // Resolve in declaration order; dependencies should resolve in order
   for (const task of ast.tasks) {
     let startOffset: number;
-    if (task.startAfter) {
+    if (hasStartDate && task.startDate) {
+      // Explicit calendar start: distance in days from project start.
+      const taskMs = parseDate(task.startDate).getTime();
+      startOffset = Math.max(0, Math.round((taskMs - startMs) / 86400000));
+    } else if (task.startAfter) {
       const dep = planned.get(task.startAfter);
       if (dep) {
         startOffset = workingDayOffsetAfter(dep.endOffset, startMs, closed);
@@ -99,8 +110,36 @@ export function layoutGantt(ast: GanttAst): Scene {
   const titleHeight = ast.title ? TITLE_FONT + TITLE_GAP : 0;
   const gridW = totalDays * DAY_WIDTH;
   const totalW = PAGE_PAD * 2 + labelW + gridW;
+
+  // Pre-compute per-task row offsets, inserting a section-header row each
+  // time the section name changes to a non-empty value.
+  interface Row {
+    kind: 'task' | 'section';
+    y: number;
+    h: number;
+    /** Task index when kind === 'task'. */
+    taskIndex?: number;
+    /** Section title when kind === 'section'. */
+    section?: string;
+  }
+  const rows: Row[] = [];
+  let cursorY = 0;
+  let lastSection: string | undefined = undefined;
+  for (let r = 0; r < ast.tasks.length; r++) {
+    const sec = ast.tasks[r]!.section ?? '';
+    if (sec && sec !== lastSection) {
+      rows.push({ kind: 'section', y: cursorY, h: SECTION_HEIGHT, section: sec });
+      cursorY += SECTION_HEIGHT;
+      lastSection = sec;
+    } else if (!sec) {
+      lastSection = '';
+    }
+    rows.push({ kind: 'task', y: cursorY, h: ROW_HEIGHT, taskIndex: r });
+    cursorY += ROW_HEIGHT;
+  }
+  const bodyHeight = cursorY;
   const totalH =
-    PAGE_PAD + titleHeight + HEADER_TOTAL_H + ROW_HEIGHT * ast.tasks.length + PAGE_PAD;
+    PAGE_PAD + titleHeight + HEADER_TOTAL_H + bodyHeight + PAGE_PAD;
 
   const originX = PAGE_PAD + labelW;
   const originY = PAGE_PAD + titleHeight + HEADER_TOTAL_H;
@@ -119,18 +158,21 @@ export function layoutGantt(ast: GanttAst): Scene {
     });
   }
 
-  // Closed-day background bands
-  for (let i = 0; i < totalDays; i++) {
-    const d = addDays(startDate, i);
-    if (closed.has(WEEKDAY_NAMES[d.getUTCDay()]!)) {
-      shapes.push({
-        type: 'rect',
-        x: originX + i * DAY_WIDTH,
-        y: originY,
-        w: DAY_WIDTH,
-        h: ast.tasks.length * ROW_HEIGHT,
-        style: { fill: COLOR_CLOSED, stroke: 'none' },
-      });
+  // Closed-day background bands (only when we have a real start date and
+  // therefore real weekdays to map onto).
+  if (hasStartDate) {
+    for (let i = 0; i < totalDays; i++) {
+      const d = addDays(startDate, i);
+      if (closed.has(WEEKDAY_NAMES[d.getUTCDay()]!)) {
+        shapes.push({
+          type: 'rect',
+          x: originX + i * DAY_WIDTH,
+          y: originY,
+          w: DAY_WIDTH,
+          h: bodyHeight,
+          style: { fill: COLOR_CLOSED, stroke: 'none' },
+        });
+      }
     }
   }
 
@@ -144,49 +186,52 @@ export function layoutGantt(ast: GanttAst): Scene {
     style: { fill: COLOR_HEADER_FILL, stroke: COLOR_GRID, strokeWidth: 1 },
   });
 
-  // Month label spans
-  let i = 0;
-  while (i < totalDays) {
-    const d = addDays(startDate, i);
-    const monthStart = i;
-    let monthEnd = i;
-    while (monthEnd + 1 < totalDays) {
-      const next = addDays(startDate, monthEnd + 1);
-      if (next.getUTCMonth() !== d.getUTCMonth() || next.getUTCFullYear() !== d.getUTCFullYear()) break;
-      monthEnd++;
-    }
-    const spanW = (monthEnd - monthStart + 1) * DAY_WIDTH;
-    const monthLabel = `${MONTH_SHORT[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
-    shapes.push({
-      type: 'text',
-      x: originX + monthStart * DAY_WIDTH + spanW / 2,
-      y: PAGE_PAD + titleHeight + HEADER_MONTH_H / 2,
-      text: monthLabel,
-      anchor: 'middle',
-      baseline: 'middle',
-      font: { family: FONT_FAMILY, size: FONT_HEADER, weight: 'bold', color: COLOR_TEXT },
-    });
-    if (monthStart > 0) {
+  // Month label spans (only meaningful when we have a real calendar date).
+  if (hasStartDate) {
+    let i = 0;
+    while (i < totalDays) {
+      const d = addDays(startDate, i);
+      const monthStart = i;
+      let monthEnd = i;
+      while (monthEnd + 1 < totalDays) {
+        const next = addDays(startDate, monthEnd + 1);
+        if (next.getUTCMonth() !== d.getUTCMonth() || next.getUTCFullYear() !== d.getUTCFullYear()) break;
+        monthEnd++;
+      }
+      const spanW = (monthEnd - monthStart + 1) * DAY_WIDTH;
+      const monthLabel = `${MONTH_SHORT[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
       shapes.push({
-        type: 'line',
-        x1: originX + monthStart * DAY_WIDTH,
-        y1: PAGE_PAD + titleHeight,
-        x2: originX + monthStart * DAY_WIDTH,
-        y2: PAGE_PAD + titleHeight + HEADER_TOTAL_H,
-        style: { stroke: COLOR_GRID, strokeWidth: 1 },
+        type: 'text',
+        x: originX + monthStart * DAY_WIDTH + spanW / 2,
+        y: PAGE_PAD + titleHeight + HEADER_MONTH_H / 2,
+        text: monthLabel,
+        anchor: 'middle',
+        baseline: 'middle',
+        font: { family: FONT_FAMILY, size: FONT_HEADER, weight: 'bold', color: COLOR_TEXT },
       });
+      if (monthStart > 0) {
+        shapes.push({
+          type: 'line',
+          x1: originX + monthStart * DAY_WIDTH,
+          y1: PAGE_PAD + titleHeight,
+          x2: originX + monthStart * DAY_WIDTH,
+          y2: PAGE_PAD + titleHeight + HEADER_TOTAL_H,
+          style: { stroke: COLOR_GRID, strokeWidth: 1 },
+        });
+      }
+      i = monthEnd + 1;
     }
-    i = monthEnd + 1;
   }
 
   // Day number row
   for (let k = 0; k < totalDays; k++) {
     const d = addDays(startDate, k);
+    const dayLabel = hasStartDate ? String(d.getUTCDate()) : String(k + 1);
     shapes.push({
       type: 'text',
       x: originX + k * DAY_WIDTH + DAY_WIDTH / 2,
       y: PAGE_PAD + titleHeight + HEADER_MONTH_H + HEADER_DAY_H / 2,
-      text: String(d.getUTCDate()),
+      text: dayLabel,
       anchor: 'middle',
       baseline: 'middle',
       font: { family: FONT_FAMILY, size: FONT_HEADER, color: COLOR_TEXT },
@@ -197,7 +242,7 @@ export function layoutGantt(ast: GanttAst): Scene {
         x1: originX + k * DAY_WIDTH,
         y1: PAGE_PAD + titleHeight + HEADER_MONTH_H,
         x2: originX + k * DAY_WIDTH,
-        y2: originY + ast.tasks.length * ROW_HEIGHT,
+        y2: originY + bodyHeight,
         style: { stroke: COLOR_GRID, strokeWidth: 1 },
       });
     }
@@ -209,22 +254,52 @@ export function layoutGantt(ast: GanttAst): Scene {
     x: originX,
     y: originY,
     w: gridW,
-    h: ast.tasks.length * ROW_HEIGHT,
+    h: bodyHeight,
     style: { fill: 'none', stroke: COLOR_GRID, strokeWidth: 1 },
   });
 
-  // Task rows
-  for (let r = 0; r < ast.tasks.length; r++) {
-    const task = ast.tasks[r]!;
-    const rowY = originY + r * ROW_HEIGHT;
+  // Section header rows
+  for (const row of rows) {
+    if (row.kind !== 'section') continue;
+    const ry = originY + row.y;
+    shapes.push({
+      type: 'rect',
+      x: PAGE_PAD,
+      y: ry,
+      w: totalW - PAGE_PAD * 2,
+      h: row.h,
+      style: { fill: COLOR_SECTION_FILL, stroke: COLOR_GRID, strokeWidth: 1 },
+    });
+    shapes.push({
+      type: 'text',
+      x: PAGE_PAD + LABEL_PAD_X,
+      y: ry + row.h / 2,
+      text: row.section!,
+      anchor: 'start',
+      baseline: 'middle',
+      font: { family: FONT_FAMILY, size: FONT_LABEL, weight: 'bold', color: COLOR_SECTION_TEXT },
+    });
+  }
 
-    if (r > 0) {
+  // Task rows
+  let drewSeparatorAbove = false;
+  for (const row of rows) {
+    if (row.kind === 'section') {
+      drewSeparatorAbove = true; // section row visually separates the next task
+      continue;
+    }
+    const r = row.taskIndex!;
+    const task = ast.tasks[r]!;
+    const rowY = originY + row.y;
+
+    if (r > 0 && !drewSeparatorAbove) {
       shapes.push({
         type: 'line',
         x1: PAGE_PAD, y1: rowY, x2: originX + gridW, y2: rowY,
         style: { stroke: COLOR_GRID, strokeWidth: 1 },
       });
     }
+    drewSeparatorAbove = false;
 
     // Label (left column)
     const labelSuffix = task.resources > 0 ? ` (${task.resources}p)` : '';
@@ -351,7 +426,7 @@ function emptyScene(): Scene {
       {
         type: 'text',
         x: 140, y: 30,
-        text: '(empty gantt — needs Project starts + tasks)',
+        text: '(empty gantt — needs at least one task)',
         anchor: 'middle', baseline: 'middle',
         font: { family: FONT_FAMILY, size: 12, color: '#999' },
       },

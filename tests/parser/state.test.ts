@@ -60,4 +60,55 @@ describe('state parser', () => {
     expect(a.states.filter((s) => s.stateKind === 'initial')).toHaveLength(1);
     expect(a.states.filter((s) => s.stateKind === 'final')).toHaveLength(1);
   });
+
+  it('parses `state X : description` without style fields', () => {
+    const a = ast('@startuml\nstate s1 : s1 description\n@enduml');
+    const s1 = a.states.find((s) => s.id === 's1');
+    expect(s1).toBeDefined();
+    expect(s1?.description).toBe('s1 description');
+    expect(s1?.fill).toBeUndefined();
+    expect(s1?.lineColor).toBeUndefined();
+    expect(s1?.lineStyle).toBeUndefined();
+    expect(s1?.textColor).toBeUndefined();
+  });
+
+  it('parses inline style suffix on state declarations', () => {
+    const src = [
+      '@startuml',
+      'state s1 : s1 description',
+      'state s2 #pink;line:red;line.bold;text:red : s2 description',
+      'state s3 #palegreen;line:green;line.dashed;text:green : s3 description',
+      'state s4 #aliceblue;line:blue;line.dotted;text:blue : s4 description',
+      '@enduml',
+    ].join('\n');
+    const a = ast(src);
+    const byId = new Map(a.states.map((s) => [s.id, s]));
+
+    expect(byId.get('s1')).toMatchObject({
+      description: 's1 description',
+    });
+    expect(byId.get('s1')?.fill).toBeUndefined();
+
+    expect(byId.get('s2')).toMatchObject({
+      description: 's2 description',
+      fill: 'pink',
+      lineColor: 'red',
+      lineStyle: 'bold',
+      textColor: 'red',
+    });
+    expect(byId.get('s3')).toMatchObject({
+      description: 's3 description',
+      fill: 'palegreen',
+      lineColor: 'green',
+      lineStyle: 'dashed',
+      textColor: 'green',
+    });
+    expect(byId.get('s4')).toMatchObject({
+      description: 's4 description',
+      fill: 'aliceblue',
+      lineColor: 'blue',
+      lineStyle: 'dotted',
+      textColor: 'blue',
+    });
+  });
 });

@@ -19,6 +19,28 @@ export interface ParticipantSection {
   lines: ParticipantLine[];
 }
 
+export interface ParticipantStereotype {
+  /** Text inside `<<…>>` minus an optional leading `(X,#color)` spot block. */
+  label?: string;
+  /** Optional `(X,#RRGGBB)` color-spot (UML class-diagram convention). */
+  spot?: { char: string; color: string };
+}
+
+/**
+ * `box "Title" [#Color] ... end box` — groups consecutive participants under
+ * a colored bounding rectangle. Membership is tracked per-participant via the
+ * `box` field below; the layout reconstructs the bounding rectangle by
+ * grouping contiguous lanes that share the same `box.id`.
+ */
+export interface ParticipantBox {
+  /** 1-based counter, unique per `box ... end box` pair. */
+  id: number;
+  /** Optional title rendered at the top-left inside the box. */
+  title?: string;
+  /** Optional background fill (CSS-resolvable color string). */
+  color?: string;
+}
+
 export interface Participant {
   id: string;
   label: string;
@@ -26,6 +48,18 @@ export interface Participant {
   color?: string;
   /** Multi-section content from `participant X [ ... ]` blocks. */
   sections?: ParticipantSection[];
+  /** Optional `<< ... >>` stereotype block at the end of the declaration. */
+  stereotype?: ParticipantStereotype;
+  /** Set when this participant was declared inside a `box ... end box`. */
+  box?: ParticipantBox;
+  /**
+   * Explicit column-order hint from the `order N` suffix on a participant
+   * declaration. Lower N renders to the left. Participants without an
+   * explicit `order` keep their declaration position; the layout stable-sorts
+   * the list using `order ?? +Infinity` so explicit-order entries are placed
+   * first in ascending order and the rest preserve declaration order.
+   */
+  order?: number;
 }
 
 export type ArrowStyle = 'solid' | 'dashed';
@@ -62,6 +96,67 @@ export interface MessageStmt {
   endMarker?: ArrowMarker;
   /** Per-message color from a `[#color]` directive in the arrow. */
   color?: string;
+  /** `A -> B **` — B's lifeline starts at this message. */
+  create?: boolean;
+  /** `A -> B !!` — B's lifeline ends at this message (red X marker). */
+  destroy?: boolean;
+  /**
+   * `A -> B ++` — push a new activation frame on B (the target) at the same
+   * point an autoactivate would, but only on this single message. Uses the
+   * message's `color` if present, else the default activation fill.
+   */
+  activateTarget?: boolean;
+  /**
+   * `A -> B --` — pop one activation frame from A (the sender). PlantUML's
+   * "reply and deactivate self" shorthand: applies right at the arrow's y.
+   */
+  deactivateSource?: boolean;
+  /**
+   * "Found message" — the `from` end is the diagram's left/right edge instead
+   * of a participant. `from` is the empty string when set. PlantUML syntax:
+   *   `[-> Bob`         (left boundary, tail at diagram edge)
+   *   `Bob <-]`         (right boundary, reversed so the source is the boundary)
+   *   `?-> Bob`         (short-left, tail is a short stub just left of Bob)
+   *   `Bob <-?`         (short-right, reversed, tail just right of Bob)
+   */
+  fromBoundary?: 'left' | 'right' | 'short-left' | 'short-right';
+  /**
+   * "Lost message" — the `to` end is the diagram's left/right edge instead of
+   * a participant. `to` is the empty string when set. PlantUML syntax:
+   *   `Bob ->]`         (right boundary, head at diagram edge)
+   *   `[<- Bob`         (left boundary, reversed so the target is the boundary)
+   *   `Bob ->?`         (short-right, head is a short stub just right of Bob)
+   *   `?<- Bob`         (short-left, reversed, head just left of Bob)
+   */
+  toBoundary?: 'left' | 'right' | 'short-left' | 'short-right';
+  /**
+   * `A ->(N) B` / `A (N)<- B` — "slanted" / timed arrow. N is a non-negative
+   * integer expressing latency, drawn as a downward slope: the arrow's tail
+   * starts at the sender's lifeline at the message's y, and the head lands on
+   * the receiver's lifeline at `y + N * DURATION_SCALE`. Undefined when the
+   * arrow is the normal horizontal form.
+   */
+  duration?: number;
+}
+
+/**
+ * `return [label]` — dashed reply arrow back to the most recent sender that
+ * has an open activation, popping one level of the autoactivate stack on the
+ * current responder.
+ */
+export interface ReturnStmt {
+  type: 'return';
+  text: string;
+}
+
+/**
+ * `autoactivate on|off` — toggles automatic activation: every subsequent
+ * message activates its target's lifeline; every `return` deactivates one
+ * level on the sender.
+ */
+export interface AutoActivateStmt {
+  type: 'autoactivate';
+  enabled: boolean;
 }
 
 export type NotePosition = 'left' | 'right' | 'over' | 'across';
@@ -114,11 +209,22 @@ export interface GroupStartStmt {
   type: 'groupStart';
   kind: GroupKind;
   label: string;
+  /** Optional fill color for the small folded-corner tab in the top-left.
+   *  Parsed from `alt#Gold` or `alt #Gold` (the first `#color` token). */
+  tabColor?: string;
+  /** Optional background fill for the FIRST branch's body (between the tab
+   *  strip and the first `else` divider, or the bottom if there is no
+   *  `else`). Parsed from the SECOND `#color` token on the start line. */
+  branchColor?: string;
 }
 
 export interface GroupElseStmt {
   type: 'groupElse';
   label: string;
+  /** Optional background fill for the NEXT branch's body (from this `else`
+   *  down to the next `else` or `end`). Parsed from the `#color` token
+   *  immediately after `else`. */
+  branchColor?: string;
 }
 
 export interface GroupEndStmt {
@@ -193,7 +299,9 @@ export type SequenceStatement =
   | AutoNumberStmt
   | DividerStmt
   | NewPageStmt
-  | RefStmt;
+  | RefStmt
+  | ReturnStmt
+  | AutoActivateStmt;
 
 export interface SequenceAst {
   kind: 'sequence';
@@ -204,4 +312,37 @@ export interface SequenceAst {
   footer: string;
   participants: Participant[];
   statements: SequenceStatement[];
+  /**
+   * Skinparam map populated by `skinparam` directives (one-liners and block
+   * form). Keys are lower-cased; group prefixes are dropped, so `skinparam
+   * sequence { ArrowColor red }` lands as `arrowcolor`. Values are kept as the
+   * raw token tail of the source line (e.g. `'DeepSkyBlue'`, `'#EEEBDC'`,
+   * `'17'`, `'true'`, `'Impact'`). Layout resolves named colors at the point
+   * of use via `resolveSkinColor`.
+   */
+  skin?: Record<string, string>;
+  /**
+   * Style map populated by `<style> selector { Property Value ... } </style>`
+   * blocks. Outer key is the selector name lower-cased (`lifeline`, `delay`,
+   * `arrow`, `participant`, ...). Inner key is the property name lower-cased
+   * (`linestyle`, `linecolor`, ...). Value is the raw token tail of the source
+   * line. Only `linestyle` is wired into the renderer this round; other
+   * captured properties are intentionally no-ops.
+   */
+  styles?: Record<string, Record<string, string>>;
+  /**
+   * `hide unlinked` — when true, participants that are never referenced by any
+   * message / activate / note / ref / create / destroy are filtered out at
+   * layout time. The declaration order is preserved among the survivors.
+   */
+  hideUnlinked?: boolean;
+  /**
+   * `mainframe <label>` — wraps the entire diagram body in a bordered
+   * rectangle with a small folded-corner tab in the top-left containing the
+   * label. The label is stored with raw inline markup (`**bold**`,
+   * `//italic//`, …) intact so layout can render bold spans via
+   * `parseLabelMarkup`. If the directive appears more than once, the LAST
+   * occurrence wins.
+   */
+  mainframe?: string;
 }

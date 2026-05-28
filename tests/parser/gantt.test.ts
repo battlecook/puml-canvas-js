@@ -51,4 +51,57 @@ describe('gantt parser', () => {
     expect(a.tasks[1]?.startAfter).toBe('A');
     expect(a.tasks[2]?.startAfter).toBe('B');
   });
+
+  it('parses explicit [Task] starts/ends date pairs and computes inclusive duration', () => {
+    const src = [
+      '@startgantt',
+      'Project starts 2020-07-01',
+      '[Prototype design] starts 2020-07-01',
+      '[Test prototype] starts 2020-07-16',
+      '[Prototype design] ends 2020-07-15',
+      '[Test prototype] ends 2020-07-25',
+      '@endgantt',
+    ].join('\n');
+    const a = parseGantt(src);
+    expect(a.startDate).toBe('2020-07-01');
+    expect(a.tasks).toHaveLength(2);
+    expect(a.tasks[0]).toMatchObject({
+      id: 'Prototype design',
+      startDate: '2020-07-01',
+      endDate: '2020-07-15',
+      duration: 15,
+    });
+    expect(a.tasks[1]).toMatchObject({
+      id: 'Test prototype',
+      startDate: '2020-07-16',
+      endDate: '2020-07-25',
+      duration: 10,
+    });
+  });
+
+  it('parses [Task] requires N days|weeks plus compound durations and sections', () => {
+    const src = [
+      '@startgantt',
+      '[Prototype design] requires 15 days',
+      '[Test prototype] requires 10 days',
+      '-- All example --',
+      '[Task 1 (1 day)] requires 1 day',
+      '[T2 (5 days)] requires 5 days',
+      '[T3 (1 week)] requires 1 week',
+      '[T4 (1 week and 4 days)] requires 1 week and 4 days',
+      '[T5 (2 weeks)] requires 2 weeks',
+      '@endgantt',
+    ].join('\n');
+    const a = parseGantt(src);
+
+    expect(a.tasks).toHaveLength(7);
+    expect(a.tasks.map((t) => t.duration)).toEqual([15, 10, 1, 5, 7, 11, 14]);
+
+    // Section: first two tasks have no section, last five all in "All example".
+    expect(a.tasks[0]?.section).toBeUndefined();
+    expect(a.tasks[1]?.section).toBeUndefined();
+    for (let i = 2; i < 7; i++) {
+      expect(a.tasks[i]?.section).toBe('All example');
+    }
+  });
 });

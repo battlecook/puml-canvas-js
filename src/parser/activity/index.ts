@@ -1,4 +1,5 @@
 import type {
+  ActionNode,
   ActivityAst,
   ActivityNode,
   ForkNode,
@@ -18,6 +19,12 @@ const ACTION = /^:(.+);$/;
 // `:Some text;`. PlantUML本家 doesn't document this but several PlantUML-compatible
 // viewers accept it as a markdown-style shortcut and render a sequential flow.
 const DASH_ACTION = /^-\s+(.+?)\s*$/;
+// Extension: `* Some text` (or `** Some text`, `*** Some text`, …) bullet lines
+// are treated the same way — equivalent to `:Some text;`. The leading star
+// count determines the nesting level: `*` is depth 1, `**` is depth 2, etc.
+// Children are attached to the most recent parent at one level shallower via
+// an explicit parent-stack pass after the regular sequential parse.
+const STAR_ACTION = /^(\*+)\s+(.+?)\s*$/;
 const IF = /^if\s*\((.*?)\)\s*then(?:\s*\((.*?)\))?\s*$/i;
 const ELSEIF = /^elseif\s*\((.*?)\)\s*then(?:\s*\((.*?)\))?\s*$/i;
 const ELSE = /^else(?:\s*\((.*?)\))?\s*$/i;
@@ -41,8 +48,12 @@ const BLOCK_CLOSE = /^\}\s*$/;
 
 export function parseActivity(source: string): ActivityAst {
   const ast: ActivityAst = { kind: 'activity', title: '', body: [] };
+  const rawLines = source.split(/\r\n|\r|\n/);
+  const { lines: afterStyle, styles } = extractStyleBlocks(rawLines);
+  if (Object.keys(styles).length > 0) ast.styles = styles;
+
   const lines: string[] = [];
-  for (const raw of source.split(/\r\n|\r|\n/)) {
+  for (const raw of afterStyle) {
     const t = raw.trim();
     if (!t) continue;
     if (LINE_COMMENT.test(t)) continue;
@@ -58,6 +69,71 @@ export function parseActivity(source: string): ActivityAst {
   const ctx = { lines, i: 0 };
   ast.body = parseStatements(ctx, isTerminator);
   return ast;
+}
+
+/**
+ * Pre-pass that lifts `<style> selector { Property Value ... } </style>` blocks
+ * out of the source. Mirrors the sequence-diagram implementation in
+ * `src/parser/sequence/index.ts`. Selectors and property names are stored
+ * lower-cased; values keep their raw whitespace-separated tail. Layout reads
+ * `element.minimumwidth` this round; other captured properties are no-ops.
+ */
+function extractStyleBlocks(
+  rawLines: string[],
+): { lines: string[]; styles: Record<string, Record<string, string>> } {
+  const out: string[] = [];
+  const styles: Record<string, Record<string, string>> = {};
+  let inStyleBlock = false;
+  let currentSelector: string | null = null;
+
+  for (const raw of rawLines) {
+    const text = raw.trim();
+
+    if (!inStyleBlock) {
+      if (/^<style>\s*$/i.test(text)) {
+        inStyleBlock = true;
+        currentSelector = null;
+        continue;
+      }
+      out.push(raw);
+      continue;
+    }
+
+    if (/^<\/style>\s*$/i.test(text)) {
+      inStyleBlock = false;
+      currentSelector = null;
+      continue;
+    }
+    if (!text) continue;
+
+    if (currentSelector === null) {
+      // Single-line form: `selector {Property Value}` — closed on same line.
+      const oneLine = /^([A-Za-z_][A-Za-z0-9_-]*)\s*\{\s*(\S+)\s+(.+?)\s*\}\s*$/.exec(text);
+      if (oneLine) {
+        const sel = oneLine[1]!.toLowerCase();
+        if (!styles[sel]) styles[sel] = {};
+        styles[sel]![oneLine[2]!.toLowerCase()] = oneLine[3]!.trim();
+        continue;
+      }
+      const open = /^([A-Za-z_][A-Za-z0-9_-]*)\s*\{?\s*$/.exec(text);
+      if (open) {
+        currentSelector = open[1]!.toLowerCase();
+        if (!styles[currentSelector]) styles[currentSelector] = {};
+      }
+      continue;
+    }
+
+    if (text === '}' || /^\}\s*$/.test(text)) {
+      currentSelector = null;
+      continue;
+    }
+    const prop = /^(\S+)\s+(.+)$/.exec(text);
+    if (prop) {
+      styles[currentSelector]![prop[1]!.toLowerCase()] = prop[2]!.trim();
+    }
+  }
+
+  return { lines: out, styles };
 }
 
 interface Ctx {
@@ -129,6 +205,11 @@ function parseStatement(ctx: Ctx): ActivityNode | null {
   if (dm) {
     ctx.i++;
     return { type: 'action', text: dm[1]!.trim() };
+  }
+
+  const sm = STAR_ACTION.exec(line);
+  if (sm) {
+    return parseBulletAction(ctx, sm[1]!.length);
   }
 
   if (END_NODE.test(line)) {
@@ -217,6 +298,30 @@ function parsePartition(ctx: Ctx): PartitionNode {
     ctx.i++;
   }
   return { type: 'partition', name, body };
+}
+
+/**
+ * Consumes the current bullet-list line at the given star `depth` and
+ * recursively attaches subsequent bullets whose depth is strictly greater as
+ * its `children`. Bullets at the same depth (siblings) are left for the outer
+ * `parseStatements` loop to pick up as separate top-level entries. Bullets
+ * with depth gaps (e.g. `*` followed by `***`) still nest — any depth > parent
+ * counts as a descendant of the parent.
+ */
+function parseBulletAction(ctx: Ctx, depth: number): ActionNode {
+  const sm = STAR_ACTION.exec(ctx.lines[ctx.i]!)!;
+  ctx.i++;
+  const node: ActionNode = { type: 'action', text: sm[2]!.trim() };
+  const children: ActionNode[] = [];
+  while (ctx.i < ctx.lines.length) {
+    const next = STAR_ACTION.exec(ctx.lines[ctx.i]!);
+    if (!next) break;
+    const nextDepth = next[1]!.length;
+    if (nextDepth <= depth) break;
+    children.push(parseBulletAction(ctx, nextDepth));
+  }
+  if (children.length > 0) node.children = children;
+  return node;
 }
 
 function parseFork(ctx: Ctx): ForkNode {

@@ -51,6 +51,7 @@ export type {
   ParticipantLineStyle,
   ParticipantLine,
   ParticipantSection,
+  ParticipantBox,
   Participant,
   ArrowMarker,
   ArrowStyle,
@@ -65,6 +66,8 @@ export type {
   GroupElseStmt,
   GroupEndStmt,
   AutoNumberStmt,
+  AutoActivateStmt,
+  ReturnStmt,
   DividerStmt,
   SequenceStatement,
   SequenceAst,
@@ -88,6 +91,7 @@ export type {
   UCRelationship,
   UCContainer,
   UseCaseAst,
+  LabelBlock,
 } from './usecase.js';
 
 export type {

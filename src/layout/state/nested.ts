@@ -303,14 +303,28 @@ function measureLeaf(node: StateNode): { w: number; h: number } {
     case 'normal':
     default: {
       const text = node.name || node.id;
-      const lw = measureText(text, FONT_LABEL).width;
-      const lh = measureText(text, FONT_LABEL).height;
+      const nameM = measureText(text, FONT_LABEL);
+      let w = nameM.width;
+      let h = nameM.height;
+      if (node.description) {
+        const descM = measureText(node.description, FONT_LABEL);
+        w = Math.max(w, descM.width);
+        h += descM.height + 4;
+      }
       return {
-        w: Math.max(NORMAL_MIN_W, lw + NORMAL_PAD_X * 2),
-        h: Math.max(NORMAL_MIN_H, lh + NORMAL_PAD_Y * 2),
+        w: Math.max(NORMAL_MIN_W, w + NORMAL_PAD_X * 2),
+        h: Math.max(NORMAL_MIN_H, h + NORMAL_PAD_Y * 2),
       };
     }
   }
+}
+
+function leafRectStyle(node: StateNode, baseFill: string, baseStroke: string): Style {
+  const style: Style = { fill: node.fill ?? baseFill, stroke: node.lineColor ?? baseStroke, strokeWidth: 1 };
+  if (node.lineStyle === 'bold') style.strokeWidth = 2;
+  else if (node.lineStyle === 'dashed') style.strokeDasharray = '4,2';
+  else if (node.lineStyle === 'dotted') style.strokeDasharray = '2,3';
+  return style;
 }
 
 function drawLeaf(node: StateNode, x: number, y: number, w: number, h: number): Shape[] {
@@ -355,22 +369,46 @@ function drawLeaf(node: StateNode, x: number, y: number, w: number, h: number): 
         },
       ];
     case 'normal':
-    default:
-      return [
+    default: {
+      const textColor = node.textColor ?? '#000';
+      const shapes: Shape[] = [
         {
           type: 'rect',
           x, y, w, h,
           rx: 8, ry: 8,
-          style: { fill: COLOR_NORMAL_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
-        },
-        {
-          type: 'text',
-          x: cx, y: cy,
-          text: node.name || node.id,
-          anchor: 'middle', baseline: 'middle',
-          font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
+          style: leafRectStyle(node, COLOR_NORMAL_FILL, COLOR_LINE),
         },
       ];
+      const labelText = node.name || node.id;
+      if (node.description) {
+        const lh = measureText(labelText, FONT_LABEL).height;
+        const nameY = y + NORMAL_PAD_Y + lh / 2;
+        const descY = nameY + lh / 2 + 4 + measureText(node.description, FONT_LABEL).height / 2;
+        shapes.push({
+          type: 'text',
+          x: cx, y: nameY,
+          text: labelText,
+          anchor: 'middle', baseline: 'middle',
+          font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+        });
+        shapes.push({
+          type: 'text',
+          x: cx, y: descY,
+          text: node.description,
+          anchor: 'middle', baseline: 'middle',
+          font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+        });
+      } else {
+        shapes.push({
+          type: 'text',
+          x: cx, y: cy,
+          text: labelText,
+          anchor: 'middle', baseline: 'middle',
+          font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+        });
+      }
+      return shapes;
+    }
   }
 }
 

@@ -1,6 +1,14 @@
 export interface ActionNode {
   type: 'action';
   text: string;
+  /**
+   * Nested child actions populated by the bullet-list shortcut (`* parent` /
+   * `** child` / `*** grandchild`). Each child is itself an `ActionNode` and
+   * may recursively contain further `children`. Only the bullet shortcut
+   * produces nesting; the `:Action;` and `- Action` syntaxes always leave this
+   * empty/undefined for backwards compatibility.
+   */
+  children?: ActionNode[];
 }
 
 export interface StartNode {
@@ -85,4 +93,12 @@ export interface ActivityAst {
   kind: 'activity';
   title: string;
   body: ActivityNode[];
+  /**
+   * Style map populated by `<style> selector { Property Value ... } </style>`
+   * blocks (shared shape with the sequence diagram AST). Outer key is the
+   * selector name lower-cased (`element`, `action`, ...). Inner key is the
+   * property name lower-cased (`minimumwidth`, ...). Layout currently reads
+   * `element.minimumwidth` only; other captured properties are no-ops.
+   */
+  styles?: Record<string, Record<string, string>>;
 }

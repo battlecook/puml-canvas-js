@@ -83,6 +83,19 @@ function parseAtom(s: State): RegexExpr {
     if (next === 'B') return { type: 'anchor', kind: 'nonwordboundary' };
     if ('sdwSDW'.includes(next)) return { type: 'charclass', raw: '\\' + next };
     if (next === 'n' || next === 'r' || next === 't') return { type: 'charclass', raw: '\\' + next };
+    if (next === 'Q') {
+      // Literal sequence: \Q...\E matches enclosed text literally.
+      // Unterminated \Q runs to end of input (PCRE/Java semantics).
+      let value = '';
+      while (s.i < s.input.length) {
+        if (peek(s) === '\\' && s.input[s.i + 1] === 'E') {
+          s.i += 2;
+          break;
+        }
+        value += consume(s);
+      }
+      return { type: 'literal', value };
+    }
     return { type: 'literal', value: next };
   }
   if (c === '[') {

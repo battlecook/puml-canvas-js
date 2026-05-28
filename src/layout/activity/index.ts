@@ -1,4 +1,5 @@
 import type {
+  ActionNode,
   ActivityAst,
   ActivityNode,
   ForkNode,
@@ -9,6 +10,7 @@ import type {
 } from '../../ast/activity.js';
 import type { Scene, Shape, Style } from '../../scene/types.js';
 import { measureText } from '../sequence/measure.js';
+import { drawLabelSpans, measureSpansWidth, parseLabelMarkup } from '../sequence/markup.js';
 
 const PAGE_PAD = 16;
 const TITLE_FONT = 16;
@@ -56,33 +58,66 @@ interface LayoutBox {
   draw(x: number, y: number): Shape[];
 }
 
-export function layoutActivity(ast: ActivityAst): Scene {
-  const body = layoutSeq(ast.body);
-  const titleHeight = ast.title ? TITLE_FONT + TITLE_GAP : 0;
+interface LayoutOptions {
+  /**
+   * Minimum action-box width sourced from `<style> element { MinimumWidth N }`.
+   * Defaults to `ACTION_MIN_W` (80) when no style is declared. Diamonds, forks
+   * and partitions ignore this knob this round.
+   */
+  actionMinWidth: number;
+}
 
-  const totalW = body.width + PAGE_PAD * 2;
-  const totalH = body.height + PAGE_PAD * 2 + titleHeight;
+const DEFAULT_LAYOUT_OPTS: LayoutOptions = { actionMinWidth: ACTION_MIN_W };
+// Synchronous render — the layout pipeline never re-enters itself, so a
+// module-level "current options" snapshot lets nested helpers read the active
+// `<style>` knobs without threading an arg through every signature.
+let currentOpts: LayoutOptions = DEFAULT_LAYOUT_OPTS;
 
-  const children: Shape[] = [];
-  if (ast.title) {
-    children.push({
-      type: 'text',
-      x: totalW / 2,
-      y: PAGE_PAD + TITLE_FONT,
-      text: ast.title,
-      anchor: 'middle',
-      baseline: 'alphabetic',
-      font: { family: FONT_FAMILY, size: TITLE_FONT, weight: 'bold', color: '#000' },
-    });
+function resolveLayoutOptions(ast: ActivityAst): LayoutOptions {
+  const styles = ast.styles ?? {};
+  const element = styles.element ?? {};
+  let actionMinWidth = ACTION_MIN_W;
+  const raw = element.minimumwidth;
+  if (raw) {
+    const n = parseFloat(raw);
+    if (Number.isFinite(n) && n > 0) actionMinWidth = n;
   }
-  children.push(...body.draw(PAGE_PAD, PAGE_PAD + titleHeight));
+  return { actionMinWidth };
+}
 
-  return {
-    width: Math.max(totalW, 200),
-    height: Math.max(totalH, 80),
-    background: '#fff',
-    children,
-  };
+export function layoutActivity(ast: ActivityAst): Scene {
+  const opts = resolveLayoutOptions(ast);
+  currentOpts = opts;
+  try {
+    const body = layoutSeq(ast.body);
+    const titleHeight = ast.title ? TITLE_FONT + TITLE_GAP : 0;
+
+    const totalW = body.width + PAGE_PAD * 2;
+    const totalH = body.height + PAGE_PAD * 2 + titleHeight;
+
+    const children: Shape[] = [];
+    if (ast.title) {
+      children.push({
+        type: 'text',
+        x: totalW / 2,
+        y: PAGE_PAD + TITLE_FONT,
+        text: ast.title,
+        anchor: 'middle',
+        baseline: 'alphabetic',
+        font: { family: FONT_FAMILY, size: TITLE_FONT, weight: 'bold', color: '#000' },
+      });
+    }
+    children.push(...body.draw(PAGE_PAD, PAGE_PAD + titleHeight));
+
+    return {
+      width: Math.max(totalW, 200),
+      height: Math.max(totalH, 80),
+      background: '#fff',
+      children,
+    };
+  } finally {
+    currentOpts = DEFAULT_LAYOUT_OPTS;
+  }
 }
 
 function layoutNode(node: ActivityNode): LayoutBox {
@@ -90,7 +125,7 @@ function layoutNode(node: ActivityNode): LayoutBox {
     case 'start':     return layoutStart();
     case 'stop':      return layoutStop();
     case 'end':       return layoutStop();
-    case 'action':    return layoutAction(node.text);
+    case 'action':    return layoutAction(node);
     case 'if':        return layoutIf(node);
     case 'while':     return layoutWhile(node);
     case 'repeat':    return layoutRepeat(node);
@@ -160,33 +195,80 @@ function layoutSeq(nodes: ActivityNode[]): LayoutBox {
   };
 }
 
-function layoutAction(text: string): LayoutBox {
+/**
+ * Lays out a single action node. Markup tokens in the text (`**bold**`,
+ * `<i>…</i>`, etc.) are parsed via the sequence-diagram `parseLabelMarkup`
+ * helper and rendered as styled spans through `drawLabelSpans`. Unsupported
+ * tokens — `<:emoji:>`, `<&icon>`, `<img:url>`, `<U+221E>` — are left in the
+ * span buffer as raw text by the markup parser (it silently drops only the
+ * tags it recognises), so they render as inert characters instead of
+ * crashing the renderer.
+ *
+ * When `node.children` is non-empty, the parent box is rendered first and the
+ * children are arranged as a vertically stacked sub-flow below the parent
+ * with a small horizontal indent to convey hierarchy.
+ */
+function layoutAction(node: ActionNode): LayoutBox {
+  const text = node.text;
+  const spans = parseLabelMarkup(text);
+  const spansW = measureSpansWidth(spans, FONT_SIZE);
   const m = measureText(text, FONT_SIZE);
-  const w = Math.max(ACTION_MIN_W, m.width + ACTION_PAD_X * 2);
-  const h = m.height + ACTION_PAD_Y * 2;
-  return {
+  const minW = currentOpts.actionMinWidth;
+  const labelW = Math.max(spansW, m.width);
+  const w = Math.max(minW, labelW + ACTION_PAD_X * 2);
+  // Honor `<size:N>` spans when sizing the box so big text isn't clipped.
+  const maxSize = spans.reduce((mx, sp) => Math.max(mx, sp.size ?? FONT_SIZE), FONT_SIZE);
+  const labelH = Math.max(m.height, maxSize * 1.25);
+  const h = labelH + ACTION_PAD_Y * 2;
+
+  const selfBox: LayoutBox = {
     width: w,
     height: h,
     inX: w / 2,
     outX: w / 2,
     draw(x, y) {
-      return [
+      const shapes: Shape[] = [
         {
           type: 'rect',
           x, y, w, h,
           rx: 8, ry: 8,
           style: { fill: COLOR_ACTION_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
         },
-        {
-          type: 'text',
-          x: x + w / 2,
-          y: y + h / 2,
-          text,
-          anchor: 'middle',
-          baseline: 'middle',
-          font: { family: FONT_FAMILY, size: FONT_SIZE, color: '#000' },
-        },
       ];
+      shapes.push(...drawLabelSpans(spans, x + w / 2, y + h / 2, 'middle', 'middle', FONT_SIZE));
+      return shapes;
+    },
+  };
+
+  if (!node.children || node.children.length === 0) return selfBox;
+
+  // Hierarchy: render the parent box, then drop the child sub-flow below it,
+  // indented slightly to the right so the nesting reads visually. The child
+  // sub-flow is itself a regular vertical sequence.
+  const childBox = layoutSeq(node.children);
+  const INDENT = 24;
+  const childY = h + ARROW_GAP;
+  const parentCx = w / 2;
+  // The child sub-flow is placed so its centerline sits `INDENT` right of the
+  // parent's centerline. Total width is widened to fit whichever sticks out
+  // further on each side.
+  const childLeft = parentCx + INDENT - childBox.inX;
+  const childRight = childLeft + childBox.width;
+  const totalW = Math.max(w, childRight);
+  const totalH = childY + childBox.height;
+
+  return {
+    width: totalW,
+    height: totalH,
+    inX: parentCx,
+    outX: parentCx,
+    draw(x, y) {
+      const shapes: Shape[] = [];
+      shapes.push(...selfBox.draw(x, y));
+      const cxAbs = x + parentCx + INDENT;
+      shapes.push(...arrow(x + parentCx, y + h, cxAbs, y + childY));
+      shapes.push(...childBox.draw(x + childLeft, y + childY));
+      return shapes;
     },
   };
 }

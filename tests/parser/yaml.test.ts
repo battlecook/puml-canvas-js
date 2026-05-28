@@ -160,4 +160,57 @@ describe('yaml parser', () => {
       ['plantuml', 'txt', 'unsupported'],
     ]);
   });
+
+  it('strips <style> block (with nested selectors) and parses list-of-maps body', () => {
+    const ast = parseYaml(
+      [
+        '@startyaml',
+        '<style>',
+        'yamlDiagram {',
+        '  node {',
+        '    BackGroundColor lightblue',
+        '    LineColor lightblue',
+        '    FontName Helvetica',
+        '    FontColor red',
+        '    FontSize 18',
+        '    FontStyle bold',
+        '    BackGroundColor Khaki',
+        '    RoundCorner 0',
+        '    LineThickness 2',
+        '    LineStyle 10-5',
+        '    separator {',
+        '      LineThickness 0.5',
+        '      LineColor black',
+        '      LineStyle 1-5',
+        '    }',
+        '  }',
+        '  arrow {',
+        '    BackGroundColor lightblue',
+        '    LineColor green',
+        '    LineThickness 2',
+        '    LineStyle 2-5',
+        '  }',
+        '}',
+        '</style>',
+        '- name: Mark McGwire',
+        '  hr: 65',
+        '  avg: 0.278',
+        '- name: Sammy Sosa',
+        '  hr: 63',
+        '  avg: 0.288',
+        '@endyaml',
+      ].join('\n'),
+    );
+    expect(ast.parseError).toBe('');
+    expect(ast.data).toEqual([
+      { name: 'Mark McGwire', hr: 65, avg: 0.278 },
+      { name: 'Sammy Sosa', hr: 63, avg: 0.288 },
+    ]);
+    // Last-write-wins: BackGroundColor was declared twice, the later value wins.
+    expect(ast.styles?.['yamldiagram.node.backgroundcolor']).toBe('Khaki');
+    // Nested selectors are flattened into dotted keys.
+    expect(ast.styles?.['yamldiagram.node.separator.linecolor']).toBe('black');
+    expect(ast.styles?.['yamldiagram.node.separator.linestyle']).toBe('1-5');
+    expect(ast.styles?.['yamldiagram.arrow.linecolor']).toBe('green');
+  });
 });

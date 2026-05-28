@@ -32,6 +32,32 @@ describe('end-to-end pipeline', () => {
     }
   });
 
+  it('renders an empty class diagram when every class is removed', () => {
+    // Regression for the demo gallery entry "Starting names with `$`": three
+    // `$`-prefixed classes (one declared via leading-tag form) are all dropped
+    // by matching `remove` statements. The SVG should contain no class
+    // rectangles — only the empty-diagram placeholder text.
+    const svg = render([
+      '@startuml',
+      'class $C1',
+      'class $C2',
+      '$C2 class "$C2" as dollarC2',
+      'remove $C1',
+      'remove $C2',
+      'remove dollarC2',
+      '@enduml',
+    ].join('\n'));
+    expect(svg.tagName.toLowerCase()).toBe('svg');
+    // The only <rect> in an empty diagram is the canvas background (filled
+    // white at the scene origin). No class boxes should be present.
+    const rects = Array.from(svg.querySelectorAll('rect'));
+    expect(rects).toHaveLength(1);
+    expect(rects[0]!.getAttribute('x')).toBe('0');
+    expect(rects[0]!.getAttribute('y')).toBe('0');
+    const texts = Array.from(svg.querySelectorAll('text')).map((t) => t.textContent);
+    expect(texts).toContain('(empty class diagram)');
+  });
+
   it('produces a sequence AST for sequence-shaped input', () => {
     const ast = parseToAst('@startuml\nAlice -> Bob: hi\n@enduml');
     expect(ast.kind).toBe('sequence');
