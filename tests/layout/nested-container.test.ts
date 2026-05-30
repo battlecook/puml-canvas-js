@@ -140,6 +140,38 @@ describe('component diagram — interface shorthand + footer', () => {
   });
 });
 
+describe('archimate node — `archimate #Layer "Name" as id <<stereo>>`', () => {
+  it('renders 4 rectangles with the right fills and the layer-derived color', () => {
+    const scene = compile([
+      '@startuml',
+      'archimate #Technology "VPN Server" as vpnServerA <<technology-device>>',
+      'rectangle GO #lightgreen',
+      'rectangle STOP #red',
+      'rectangle WAIT #orange',
+      '@enduml',
+    ].join('\n'));
+    const rects = findShape(scene, isRect);
+    const fills = new Set(
+      rects.map((r) => (r as { style?: { fill?: string } }).style?.fill),
+    );
+    // Technology layer → green pastel; bare #Color rectangles pass through.
+    expect(fills.has('#C9E7B7')).toBe(true);
+    expect(fills.has('lightgreen')).toBe(true);
+    expect(fills.has('red')).toBe(true);
+    expect(fills.has('orange')).toBe(true);
+    // 4 boxes (one per declaration) plus optional port marks etc.
+    expect(rects.length).toBeGreaterThanOrEqual(4);
+    const texts = findShape(scene, isText);
+    // The Archimate display name and the bare rectangle labels all render.
+    expect(texts.some((t) => t.text === 'VPN Server')).toBe(true);
+    expect(texts.some((t) => t.text === 'GO')).toBe(true);
+    expect(texts.some((t) => t.text === 'STOP')).toBe(true);
+    expect(texts.some((t) => t.text === 'WAIT')).toBe(true);
+    // The stereotype renders in guillemets above the name.
+    expect(texts.some((t) => t.text === '«technology-device»')).toBe(true);
+  });
+});
+
 describe('component diagram — bracket display name + #Color', () => {
   it('renders a yellow component box for `component [Web Server] #Yellow`', () => {
     const scene = compile('@startuml\ncomponent [Web Server] #Yellow\n@enduml');
@@ -314,5 +346,265 @@ describe('deployment diagram — 17 shape keywords + inline style + deep nesting
     expect(scene.width).toBeGreaterThan(0);
     expect(scene.height).toBeGreaterThan(0);
     expect(scene.children.length).toBeGreaterThanOrEqual(17);
+  });
+
+  it('renders bracket-form component labels with `\\n` as two text rows (Bug A)', () => {
+    // PlantUML expands `\n` escapes inside bracket display labels so the
+    // component renders "Last" / "component" on two stacked rows. Before the
+    // fix the label rendered as the literal `Last\ncomponent`.
+    const scene = compile([
+      '@startuml',
+      '[First component]',
+      '[Another component] as Comp2',
+      'component Comp3',
+      'component [Last\\ncomponent] as Comp4',
+      '@enduml',
+    ].join('\n'));
+    const texts = findShape(scene, isText);
+    // Both segments must be present as their own text shapes.
+    const lastRow = texts.find((t) => t.text === 'Last');
+    const componentRow = texts.find((t) => t.text === 'component');
+    expect(lastRow, 'expected "Last" row').toBeTruthy();
+    expect(componentRow, 'expected "component" row').toBeTruthy();
+    // And the literal `Last\ncomponent` must NOT appear as a single label.
+    const literal = texts.find((t) => t.text === 'Last\\ncomponent');
+    expect(literal).toBeFalsy();
+    // The two rows belong to the same node, so they share roughly the same x
+    // and "component" sits below "Last".
+    expect(Math.abs(lastRow!.x - componentRow!.x)).toBeLessThan(2);
+    expect(componentRow!.y).toBeGreaterThan(lastRow!.y);
+  });
+});
+
+describe('component layout — remove', () => {
+  it('renders no component shapes when all components are removed', () => {
+    // Mirrors the class-diagram `remove` layout test (Task #30) for the
+    // component parser: every declaration is dropped by a matching `remove`
+    // and the empty-diagram fallback emits no body shapes.
+    const scene = compile([
+      '@startuml',
+      'component [$C1]',
+      'component [$C2] $C2',
+      'component [$C2] as dollarC2',
+      'remove $C1',
+      'remove $C2',
+      'remove dollarC2',
+      '@enduml',
+    ].join('\n'));
+    const rects = findShape(scene, isRect);
+    expect(rects).toHaveLength(0);
+  });
+});
+
+describe('component diagram — attached notes around a single component', () => {
+  it('renders 4 folded-corner note shapes positioned around the component box', () => {
+    // Failing input from Task #110: previously only the component box was
+    // drawn and all four `note <side> of C` declarations silently dropped.
+    const scene = compile([
+      '@startuml',
+      '[Component] as C',
+      'note top of C: A top note',
+      'note bottom of C',
+      'A bottom note can also be on several lines',
+      'end note',
+      'note left of C',
+      'A left note can also be on several lines',
+      'end note',
+      'note right of C: A right note',
+      '@enduml',
+    ].join('\n'));
+
+    // 4 note polygons — folded-corner rectangles share the post-it fill
+    // (#FEFFDD) and are distinct from the component box rectangle.
+    interface Poly { type: 'polygon'; points: Array<[number, number]>; style?: { fill?: string } }
+    const isPoly = (s: Shape): s is Poly & Shape => s.type === 'polygon';
+    const notePolys = findShape(scene, isPoly).filter(
+      (p) => p.style?.fill === '#FEFFDD',
+    );
+    expect(notePolys).toHaveLength(4);
+
+    // The 4 dog-ear fold polylines (one per note) confirm `drawContainerNote`
+    // emitted the correct two-shape pair for each.
+    interface PolyLine { type: 'polyline'; points: Array<[number, number]>; style?: { stroke?: string } }
+    const isPolyline = (s: Shape): s is PolyLine & Shape => s.type === 'polyline';
+    const foldLines = findShape(scene, isPolyline).filter(
+      (p) => p.points.length === 3 && p.style?.stroke === '#A0A088',
+    );
+    expect(foldLines).toHaveLength(4);
+
+    // The component rectangle is the only large rect — its bbox lets us
+    // verify each note's geometric side relative to the anchor.
+    const componentRect = findShape(scene, isRect).find(
+      (r) => r.w >= 100 && r.h >= 30,
+    );
+    expect(componentRect).toBeDefined();
+    const compLeft = componentRect!.x;
+    const compRight = componentRect!.x + componentRect!.w;
+    const compTop = componentRect!.y;
+    const compBottom = componentRect!.y + componentRect!.h;
+
+    const bboxOf = (poly: Poly) => {
+      const xs = poly.points.map((p) => p[0]);
+      const ys = poly.points.map((p) => p[1]);
+      return {
+        minX: Math.min(...xs),
+        maxX: Math.max(...xs),
+        minY: Math.min(...ys),
+        maxY: Math.max(...ys),
+      };
+    };
+
+    // Anchor each rendered note to its body text by finding the closest text
+    // shape whose anchor (start-left of the text) sits inside the polygon
+    // bbox. Then verify the polygon is on the expected side of the component.
+    const texts = findShape(scene, isText);
+    const findNoteFor = (bodyFragment: string): Poly => {
+      const t = texts.find((tt) => tt.text === bodyFragment);
+      expect(t).toBeDefined();
+      const poly = notePolys.find((p) => {
+        const b = bboxOf(p);
+        return t!.x >= b.minX && t!.x <= b.maxX && t!.y >= b.minY && t!.y <= b.maxY;
+      });
+      expect(poly).toBeDefined();
+      return poly!;
+    };
+
+    const topPoly = findNoteFor('A top note');
+    const rightPoly = findNoteFor('A right note');
+    // Multi-line bodies wrap on word boundaries — pick the first line.
+    const bottomPoly = findNoteFor('A bottom note can also be');
+    const leftPoly = findNoteFor('A left note can also be');
+
+    // `top` sits above the component, `bottom` below, `left` to the left,
+    // `right` to the right.
+    expect(bboxOf(topPoly).maxY).toBeLessThanOrEqual(compTop);
+    expect(bboxOf(bottomPoly).minY).toBeGreaterThanOrEqual(compBottom);
+    expect(bboxOf(leftPoly).maxX).toBeLessThanOrEqual(compLeft);
+    expect(bboxOf(rightPoly).minX).toBeGreaterThanOrEqual(compRight);
+  });
+});
+
+describe('component diagram — free-standing `note as N` (Bug A)', () => {
+  it('renders a folded-corner note and a dashed link from C to N', () => {
+    const scene = compile([
+      '@startuml',
+      '[Component] as C',
+      'note as N',
+      'A floating note can also be on several lines',
+      'end note',
+      'C .. N',
+      '@enduml',
+    ].join('\n'));
+    // The note fill (#FEFFDD) is unique to the note shape; one polygon =
+    // one note rendered.
+    interface Poly { type: 'polygon'; points: Array<[number, number]>; style?: { fill?: string } }
+    const isPoly = (s: Shape): s is Poly & Shape => s.type === 'polygon';
+    const noteShapes = findShape(scene, isPoly).filter(
+      (p) => p.style?.fill === '#FEFFDD',
+    );
+    expect(noteShapes).toHaveLength(1);
+    // A dashed line in the scene confirms the `..` link reached the note.
+    const dashed = findShape(scene, isLine).filter(
+      (l) => (l as { style?: { strokeDasharray?: string } }).style?.strokeDasharray,
+    );
+    expect(dashed.length).toBeGreaterThanOrEqual(1);
+    // Note body text is rendered.
+    const texts = findShape(scene, isText);
+    expect(texts.some((t) => t.text.includes('floating note'))).toBe(true);
+  });
+});
+
+describe('component diagram — auto interface from bare endpoint (Bug B)', () => {
+  it('renders Interface1/Interface2 as lollipop circles (not component boxes)', () => {
+    const scene = compile([
+      '@startuml',
+      '[Component] --> Interface1',
+      '[Component] -> Interface2',
+      '@enduml',
+    ].join('\n'));
+    // Two interfaces → two small circles. The component box is a rect.
+    const circles = findShape(scene, isCircle);
+    expect(circles.length).toBeGreaterThanOrEqual(2);
+    // The component rectangle is the only sizable rect (port marks are tiny).
+    const rects = findShape(scene, isRect);
+    const compBox = rects.find((r) => r.w >= 80 && r.h >= 30);
+    expect(compBox).toBeDefined();
+    // Interface labels render next to their circles.
+    const texts = findShape(scene, isText);
+    expect(texts.some((t) => t.text === 'Interface1')).toBe(true);
+    expect(texts.some((t) => t.text === 'Interface2')).toBe(true);
+    // `[Component]` bracket label is stripped (Bug B1) — `Component` shows,
+    // not `[Component]`.
+    expect(texts.some((t) => t.text === 'Component')).toBe(true);
+    expect(texts.every((t) => !t.text.startsWith('['))).toBe(true);
+  });
+});
+
+describe('component diagram — bracketed declarations stay inside containers (Bug C)', () => {
+  it('places [First Component] inside the "Some Group" package box', () => {
+    const scene = compile([
+      '@startuml',
+      'package "Some Group" {',
+      'HTTP - [First Component]',
+      '[Another Component]',
+      '}',
+      'node "Other Groups" {',
+      'FTP - [Second Component]',
+      '[First Component] --> FTP',
+      '}',
+      '@enduml',
+    ].join('\n'));
+    const texts = findShape(scene, isText);
+    // Container shapes (package, node) render as polygons (folder / node
+    // silhouettes). Use their point bounding box as the container region.
+    interface Poly { type: 'polygon'; points: Array<[number, number]> }
+    const isPoly = (s: Shape): s is Poly & Shape => s.type === 'polygon';
+    const polys = findShape(scene, isPoly);
+    const bboxOf = (p: Poly) => {
+      const xs = p.points.map((pt) => pt[0]);
+      const ys = p.points.map((pt) => pt[1]);
+      return {
+        x: Math.min(...xs),
+        y: Math.min(...ys),
+        w: Math.max(...xs) - Math.min(...xs),
+        h: Math.max(...ys) - Math.min(...ys),
+      };
+    };
+    const findContainerBox = (labelText: string) => {
+      const label = texts.find((t) => t.text === labelText);
+      expect(label).toBeDefined();
+      const candidates = polys
+        .map(bboxOf)
+        .filter(
+          (b) =>
+            label!.x >= b.x &&
+            label!.x <= b.x + b.w &&
+            label!.y >= b.y &&
+            label!.y <= b.y + b.h &&
+            b.w > 100,
+        )
+        .sort((a, b) => b.w * b.h - a.w * a.h);
+      expect(candidates.length).toBeGreaterThan(0);
+      return candidates[0]!;
+    };
+    const someGroupBox = findContainerBox('Some Group');
+    const otherGroupsBox = findContainerBox('Other Groups');
+    // The "First Component" and "Another Component" labels must sit inside
+    // the "Some Group" box.
+    for (const name of ['First Component', 'Another Component']) {
+      const t = texts.find((tt) => tt.text === name);
+      expect(t).toBeDefined();
+      expect(t!.x).toBeGreaterThanOrEqual(someGroupBox.x);
+      expect(t!.x).toBeLessThanOrEqual(someGroupBox.x + someGroupBox.w);
+      expect(t!.y).toBeGreaterThanOrEqual(someGroupBox.y);
+      expect(t!.y).toBeLessThanOrEqual(someGroupBox.y + someGroupBox.h);
+    }
+    // "Second Component" sits inside "Other Groups".
+    const second = texts.find((t) => t.text === 'Second Component');
+    expect(second).toBeDefined();
+    expect(second!.x).toBeGreaterThanOrEqual(otherGroupsBox.x);
+    expect(second!.x).toBeLessThanOrEqual(otherGroupsBox.x + otherGroupsBox.w);
+    expect(second!.y).toBeGreaterThanOrEqual(otherGroupsBox.y);
+    expect(second!.y).toBeLessThanOrEqual(otherGroupsBox.y + otherGroupsBox.h);
   });
 });

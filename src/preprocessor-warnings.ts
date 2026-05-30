@@ -2,10 +2,10 @@ import type { Scene, Shape } from './scene/types.js';
 
 const DIRECTIVE_PATTERNS: Array<[RegExp, string]> = [
   [/^!theme\b/i, '!theme'],
-  [/^!pragma\b/i, '!pragma'],
   [/^!include(?:url|sub|_many)?\b/i, '!include'],
   [/^!define(?:long)?\b/i, '!define'],
   [/^!undef\b/i, '!undef'],
+  [/^!pragma\b/i, '!pragma'],
   [/^!procedure\b/i, '!procedure'],
   [/^!function\b/i, '!function'],
   [/^!if\b/i, '!if'],
@@ -34,7 +34,7 @@ const GROUPED: Record<string, string> = {
 };
 
 const ORDER = [
-  '!theme', '!pragma', '!include', '!define', '!undef',
+  '!theme', '!include', '!define', '!undef', '!pragma',
   '!procedure', '!function', '!if', '!while', '!foreach',
   '!$var', '!log', '!assert',
 ];

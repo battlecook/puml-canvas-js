@@ -5,6 +5,7 @@ import type {
   EllipseShape,
   FontStyle,
   GroupShape,
+  ImageShape,
   LineShape,
   PathShape,
   PolygonShape,
@@ -17,6 +18,8 @@ import type {
   TextShape,
 } from '../../scene/types.js';
 import { svgEl } from './dom.js';
+
+const XLINK_NS = 'http://www.w3.org/1999/xlink';
 
 export interface SvgRendererOptions {
   document?: Document;
@@ -70,6 +73,7 @@ export class SvgRenderer implements Renderer<SVGSVGElement> {
       case 'path': return this.renderPath(shape);
       case 'text': return this.renderText(shape);
       case 'group': return this.renderGroup(shape);
+      case 'image': return this.renderImage(shape);
     }
   }
 
@@ -137,6 +141,19 @@ export class SvgRenderer implements Renderer<SVGSVGElement> {
   private renderGroup(s: GroupShape): SVGElement {
     const el = svgEl(this.doc, 'g', { transform: s.transform });
     for (const child of s.children) el.appendChild(this.renderShape(child));
+    return el;
+  }
+
+  private renderImage(s: ImageShape): SVGElement {
+    // SVG2 prefers `href`; older browsers (including some legacy renderers and
+    // PDF exporters) still need `xlink:href`. Setting both keeps the image
+    // visible across the widest range of consumers. Failures to load are left
+    // to the browser — no fallback glyph here for this iteration.
+    const el = svgEl(this.doc, 'image', {
+      x: s.x, y: s.y, width: s.w, height: s.h,
+      href: s.href,
+    });
+    el.setAttributeNS(XLINK_NS, 'xlink:href', s.href);
     return el;
   }
 }

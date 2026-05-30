@@ -4,6 +4,10 @@ import { measureText } from './measure.js';
 const FONT_FAMILY = 'sans-serif';
 const DEFAULT_FONT_SIZE = 12;
 
+/** Default inline-image dimensions used when rendering `<img:URL>` spans. */
+const IMG_DEFAULT_W = 80;
+const IMG_DEFAULT_H = 40;
+
 export interface LabelSpan {
   text: string;
   bold: boolean;
@@ -202,6 +206,23 @@ export function parseLabelMarkup(s: string): LabelSpan[] {
     if (s[i] === '<') {
       const rest = s.slice(i);
 
+      // Stereotype-style guillemets: `<<text>>` → `«text»` rendered italic
+      // (PlantUML convention for stereotype-like annotations inside message
+      // labels). Matched BEFORE the generic `<tag>` branch so `<<` is never
+      // misread as a malformed HTML opener.
+      const sm = /^<<\s*([^<>]*?)\s*>>/.exec(rest);
+      if (sm) {
+        flush();
+        const inner = sm[1]!;
+        const prevItalic: boolean = italic;
+        italic = true;
+        buf = `«${inner}»`;
+        flush();
+        italic = prevItalic;
+        i += sm[0].length;
+        continue;
+      }
+
       // Unicode literal: `<U+221E>` → substitute the codepoint character.
       const um = /^<U\+([0-9A-Fa-f]{1,6})>/.exec(rest);
       if (um) {
@@ -276,7 +297,10 @@ export function parseLabelMarkup(s: string): LabelSpan[] {
       if (colonClose) {
         const tag = colonClose[1]!.toLowerCase();
         flush();
-        if (tag === 'font') family = undefined;
+        // `</font>` closes BOTH the HTML-style `<font color=...>` (sets `color`)
+        // and the colon-style `<font:family>` (sets `family`). Reset both so a
+        // single closer cleanly ends either form.
+        if (tag === 'font') { family = undefined; color = undefined; }
         else if (tag === 'color') color = undefined;
         else if (tag === 'back') bgColor = undefined;
         else if (tag === 'size') size = undefined;
@@ -320,7 +344,10 @@ export function parseLabelMarkup(s: string): LabelSpan[] {
 /** Width of a multi-span line as it would render. */
 export function measureSpansWidth(spans: LabelSpan[], fontSize: number = DEFAULT_FONT_SIZE): number {
   let w = 0;
-  for (const sp of spans) w += measureText(sp.text, sp.size ?? fontSize).width;
+  for (const sp of spans) {
+    if (sp.imgUrl) w += IMG_DEFAULT_W;
+    else w += measureText(sp.text, sp.size ?? fontSize).width;
+  }
   return w;
 }
 
@@ -347,6 +374,7 @@ export function drawLabelSpans(
     !spans[0]!.color &&
     !spans[0]!.family &&
     !spans[0]!.bgColor &&
+    !spans[0]!.imgUrl &&
     spans[0]!.size === undefined
   ) {
     return [{
@@ -359,7 +387,9 @@ export function drawLabelSpans(
     }];
   }
   const sizeOf = (sp: LabelSpan): number => sp.size ?? FONT_SIZE;
-  const widths = spans.map((sp) => measureText(sp.text, sizeOf(sp)).width);
+  const widths = spans.map((sp) =>
+    sp.imgUrl ? IMG_DEFAULT_W : measureText(sp.text, sizeOf(sp)).width,
+  );
   const totalW = widths.reduce((a, b) => a + b, 0);
   let cursor = x;
   if (anchor === 'middle') cursor = x - totalW / 2;
@@ -369,6 +399,24 @@ export function drawLabelSpans(
     const sp = spans[i]!;
     const w = widths[i]!;
     const sz = sizeOf(sp);
+    if (sp.imgUrl) {
+      // Inline image: emit an `image` shape vertically centred on the text
+      // baseline. The default 80x40 box is the same regardless of the line's
+      // font size; if it's larger than the line height it will visually
+      // extend past the surrounding text (acceptable for this iteration).
+      const imgH = IMG_DEFAULT_H;
+      const imgY = baseline === 'middle' ? y - imgH / 2 : y - imgH + sz * 0.2;
+      out.push({
+        type: 'image',
+        x: cursor,
+        y: imgY,
+        w: IMG_DEFAULT_W,
+        h: imgH,
+        href: sp.imgUrl,
+      });
+      cursor += w;
+      continue;
+    }
     if (sp.text.length > 0) {
       if (sp.bgColor) {
         // Background swatch sits behind the glyphs. Height tracks the actual

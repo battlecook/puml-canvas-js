@@ -497,6 +497,11 @@ function drawLeaf(node: ContainerNode, x: number, y: number, w: number, h: numbe
     case 'process':
     case 'stack':
     case 'package':    return drawRect(node, x, y, w, h);
+    // Attached `note <side> of X` nodes — within a nested container layout we
+    // fall back to a plain rect so the surrounding frame still computes. The
+    // top-level layout in `index.ts` handles the folded-corner positioning
+    // for non-nested diagrams (where attached notes actually appear).
+    case 'note':       return drawRect(node, x, y, w, h);
   }
 }
 

@@ -88,6 +88,15 @@ export interface GroupShape {
   transform?: string;
 }
 
+export interface ImageShape {
+  type: 'image';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  href: string;
+}
+
 export type Shape =
   | RectShape
   | CircleShape
@@ -97,7 +106,8 @@ export type Shape =
   | PolygonShape
   | PathShape
   | TextShape
-  | GroupShape;
+  | GroupShape
+  | ImageShape;
 
 export interface Scene {
   width: number;

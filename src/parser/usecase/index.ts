@@ -1,6 +1,7 @@
 import type {
   LabelBlock,
   UCContainer,
+  UCJsonNode,
   UCNode,
   UCNodeKind,
   UCRelationship,
@@ -99,6 +100,17 @@ function parseLabelBlocks(label: string): LabelBlock[] | null {
 const WRAPPER = /^@(start|end)\w+/i;
 const LINE_COMMENT = /^\s*'/;
 const TITLE = /^title\s+(.+)\s*$/i;
+// `allowmixing` toggles PlantUML's "mix data types" mode that lets a use-case
+// diagram embed `json`/`yaml`/etc. blocks. We silently accept the directive
+// (it's a no-op flag on its own) and downstream parsing recognises the
+// embedded blocks unconditionally — there's no reason to gate on the flag
+// once the source has been classified as a use-case diagram.
+const ALLOW_MIXING = /^allowmixing\s*$/i;
+// `json <Name> {` — opener for an embedded JSON block. The block body runs
+// until the matching `}` (with balanced braces inside string-quoted values).
+// We capture the block name so the AST node has a stable id; the body is
+// consumed by the brace-balance loop below.
+const JSON_BLOCK_OPEN = /^json\s+(\S+)\s*\{\s*$/i;
 // `left to right direction` / `top to bottom direction` — diagram-level flow
 // hint. Stored on the AST as `direction` and consumed by layout to swap the
 // rank/within-layer axes of the sugiyama placement.
@@ -246,6 +258,89 @@ const NOTE_OF_INLINE = /^note\s+(left|right|top|bottom)\s+of\s+("[^"]+"|\([^)]+\
 const NOTE_OF_BLOCK = /^note\s+(left|right|top|bottom)\s+of\s+("[^"]+"|\([^)]+\)|\S+)\s*$/i;
 const NOTE_END = /^end\s+note\s*$/i;
 
+/**
+ * Parsed result of an inline `#<styleBlock>` peeled off a relationship line.
+ * Any field is optional; only the keys recognised by the style grammar are
+ * populated.
+ */
+interface InlineStyle {
+  /** Raw line with the `#<styleBlock>` removed, ready for arrow parsing. */
+  stripped: string;
+  lineColor?: string;
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold';
+  textColor?: string;
+}
+
+// `#<token>(;<token>)*` — a hash flush against a token consisting of
+// `[\w.:#-]` characters, optionally chained with `;`-separated sub-tokens.
+// Sub-tokens may include `:` (`line:red`, `text:red`) and `.` (`line.bold`),
+// which is why the character class is more permissive than a bare identifier.
+//
+// The block must be terminated by whitespace, `:` (start of label), or end of
+// line. It also must be space-flanked at the start so a stray `#` inside an
+// endpoint can't trigger a spurious match.
+const INLINE_STYLE_BLOCK = /(?:^|\s)(#[\w.:#-]+(?:;[\w.:#-]+)*)(?=\s|:|$)/;
+
+/**
+ * Detect and strip a PlantUML inline `#<styleBlock>` from a relationship line.
+ *
+ * Forms recognised (separated by `;`):
+ *   - `#<color>`        bare colour — shorthand for `line:<color>`.
+ *   - `line:<color>`    line stroke colour.
+ *   - `line.bold`       bold (thicker) stroke.
+ *   - `line.dashed`     long-dash dasharray.
+ *   - `line.dotted`     short-dash dasharray.
+ *   - `text:<color>`    label text colour.
+ *
+ * Returns the original line with the matched block removed (so the downstream
+ * arrow parser sees a clean `source <arrow> target [: label]` shape) and the
+ * extracted style tokens. If no block is found, `stripped` is the input
+ * verbatim and the style fields are absent.
+ */
+function peelInlineStyle(line: string): InlineStyle {
+  const m = INLINE_STYLE_BLOCK.exec(line);
+  if (!m) return { stripped: line };
+  const blockStart = m.index + (m[0].length - m[1]!.length);
+  const blockEnd = blockStart + m[1]!.length;
+  // Cut out the block and collapse the resulting double-space so the
+  // downstream arrow parser sees a clean `source <arrow> target [: label]`.
+  const stripped = (line.slice(0, blockStart) + line.slice(blockEnd))
+    .replace(/\s+/g, ' ')
+    .trim();
+  const body = m[1]!.slice(1); // drop the leading `#`
+  const out: InlineStyle = { stripped };
+  for (const rawTok of body.split(';')) {
+    const tok = rawTok.trim();
+    if (!tok) continue;
+    if (/^line:/i.test(tok)) {
+      out.lineColor = tok.slice(5).trim();
+      continue;
+    }
+    if (/^text:/i.test(tok)) {
+      out.textColor = tok.slice(5).trim();
+      continue;
+    }
+    if (/^line\.bold$/i.test(tok)) {
+      out.lineStyle = 'bold';
+      continue;
+    }
+    if (/^line\.dashed$/i.test(tok)) {
+      out.lineStyle = 'dashed';
+      continue;
+    }
+    if (/^line\.dotted$/i.test(tok)) {
+      out.lineStyle = 'dotted';
+      continue;
+    }
+    // Bare colour — apply as line colour if no explicit `line:<…>` was given
+    // earlier in the same block. PlantUML treats the first bare colour as the
+    // overall colour (line + fill); for relationships there's no fill to set,
+    // so we route it to the stroke.
+    if (!out.lineColor) out.lineColor = tok;
+  }
+  return out;
+}
+
 export function parseUseCase(source: string): UseCaseAst {
   const ast: UseCaseAst = {
     kind: 'usecase',
@@ -281,7 +376,20 @@ export function parseUseCase(source: string): UseCaseAst {
     return t;
   };
 
-  const upsert = (n: UCNode, explicit = false): UCNode => {
+  // Tracks which ids were "declared in" the active container vs merely
+  // "referenced in" it. Only declared ids populate `container.childIds` (i.e.
+  // members rendered inside the boundary box). Declaration sources:
+  //   * an explicit declaration line (`actor X`, `usecase Y`, ...);
+  //   * an auto-promotion from a parenthesized/colon-disambiguated endpoint
+  //     (`(payment)`, `:foo:`) — PlantUML treats these as declarations.
+  // Bare-id relationship endpoints (`customer -- (checkout)` where `customer`
+  // was declared outside) are REFERENCES only and must NOT join `childIds`,
+  // otherwise the layout would treat them as members of the boundary.
+  const upsert = (
+    n: UCNode,
+    explicit = false,
+    joinContainer = true,
+  ): UCNode => {
     const existing = byId.get(n.id);
     if (existing) {
       // Explicit declarations (`actor X`, `"X" as Y`, `"text" as (Id)`) win
@@ -296,12 +404,15 @@ export function parseUseCase(source: string): UseCaseAst {
     }
     byId.set(n.id, n);
     ast.nodes.push(n);
-    const top = containerStack[containerStack.length - 1];
-    if (top) top.childIds.push(n.id);
+    if (joinContainer) {
+      const top = containerStack[containerStack.length - 1];
+      if (top) top.childIds.push(n.id);
+    }
     return n;
   };
 
-  for (const raw of lines) {
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const raw = lines[lineIdx]!;
     const text = raw.trim();
     // When inside a `note <side> of X` ... `end note` block, accumulate body
     // lines verbatim (trimmed) until we hit the terminator. Empty lines are
@@ -345,7 +456,67 @@ export function parseUseCase(source: string): UseCaseAst {
       continue;
     }
 
+    // `allowmixing` is a no-op flag — it only signals to PlantUML that the
+    // subsequent source may contain JSON / YAML / etc. blocks. We always
+    // accept those blocks regardless, so the directive itself is silently
+    // dropped here.
+    if (ALLOW_MIXING.test(text)) continue;
+
     let m: RegExpExecArray | null;
+
+    // Embedded `json <Name> { ... }` block (enabled by `allowmixing`).
+    // Consume lines until the matching `}` (with brace balance so nested
+    // objects don't confuse the terminator), then run the body through
+    // `JSON.parse` and stash it under `ast.jsonNodes`. We intentionally
+    // share `JSON.parse` with the standalone JSON parser rather than
+    // re-implement an embedded-object grammar.
+    if ((m = JSON_BLOCK_OPEN.exec(text))) {
+      const id = m[1]!.trim();
+      // The opening `{` is on the header line; start the body buffer fresh
+      // at depth 1 and scan forward for the matching close.
+      const bodyLines: string[] = [];
+      let depth = 1;
+      let inString = false;
+      let escape = false;
+      let consumed = lineIdx;
+      while (++consumed < lines.length && depth > 0) {
+        const ln = lines[consumed]!;
+        for (let i = 0; i < ln.length; i++) {
+          const ch = ln[i]!;
+          if (escape) { escape = false; continue; }
+          if (inString) {
+            if (ch === '\\') { escape = true; continue; }
+            if (ch === '"') inString = false;
+            continue;
+          }
+          if (ch === '"') { inString = true; continue; }
+          if (ch === '{') depth++;
+          else if (ch === '}') {
+            depth--;
+            if (depth === 0) break;
+          }
+        }
+        if (depth === 0) {
+          // Drop a trailing `}` from this final line so the body is pure JSON
+          // content (with the outer braces re-added below).
+          const closeIdx = ln.lastIndexOf('}');
+          if (closeIdx >= 0) bodyLines.push(ln.slice(0, closeIdx));
+        } else {
+          bodyLines.push(ln);
+        }
+      }
+      const body = `{${bodyLines.join('\n')}}`.trim();
+      const node: UCJsonNode = { id, data: null };
+      try {
+        node.data = JSON.parse(body);
+      } catch (e) {
+        node.parseError = e instanceof Error ? e.message : String(e);
+      }
+      if (!ast.jsonNodes) ast.jsonNodes = [];
+      ast.jsonNodes.push(node);
+      lineIdx = consumed; // resume after the closing brace
+      continue;
+    }
     // Note declarations are checked before generic node patterns since a
     // `note ...` line otherwise wouldn't match any of the declaration rules
     // and would fall through to the relationship parser (which would emit a
@@ -485,7 +656,14 @@ export function parseUseCase(source: string): UseCaseAst {
       continue;
     }
 
-    const rel = parseRelationship(text);
+    // Peel an inline `#<styleBlock>` (`#line:red;line.bold;text:red`) off the
+    // raw relationship line BEFORE handing it to `parseRelationship`. The
+    // block sits between the target and the optional `:` label; without
+    // stripping it, the `:` inside `line:red` would be mistaken for the
+    // label-separator and the structural endpoint regex would reject the
+    // leftover `#line` tail (dropping the entire relationship silently).
+    const peeledStyle = peelInlineStyle(text);
+    const rel = parseRelationship(peeledStyle.stripped);
     if (rel) {
       const left = normalizeEndpoint(rel.source);
       const right = normalizeEndpoint(rel.target);
@@ -494,8 +672,17 @@ export function parseUseCase(source: string): UseCaseAst {
       // PlantUML default: a bare identifier on a relationship endpoint with no
       // prior declaration is treated as an actor. Parens (`(Foo)`) and colons
       // (`:Foo:`) explicitly disambiguate; everything else falls back to actor.
-      if (!byId.has(left.name)) upsert({ id: left.name, name: left.name, kind: 'actor' });
-      if (!byId.has(right.name)) upsert({ id: right.name, name: right.name, kind: 'actor' });
+      // Bare-id references inside a container are NOT promoted to members of
+      // that container — they're references to an external (or to-be-declared)
+      // node. Without this distinction, lines like `customer -- (checkout)`
+      // inside `rectangle checkout { ... }` would incorrectly attach `customer`
+      // to the boundary box even when `customer` is declared outside the block.
+      if (!byId.has(left.name)) {
+        upsert({ id: left.name, name: left.name, kind: 'actor' }, false, false);
+      }
+      if (!byId.has(right.name)) {
+        upsert({ id: right.name, name: right.name, kind: 'actor' }, false, false);
+      }
 
       // Reverse-direction arrow normalization: when the arrow token leads with
       // a head marker (`<` or `<|`), the source-order endpoints are reversed
@@ -505,6 +692,10 @@ export function parseUseCase(source: string): UseCaseAst {
       // with existing tests, so this normalization lives in the use-case
       // parser only.
       const reverse = rel.arrowToken.startsWith('<');
+      // `\n` escapes inside the arrow label should expand to real newlines so
+      // layout can split a multi-line label across rows, same as `unescapeLabel`
+      // does for parenthesized usecase displays.
+      const label = unescapeLabel(rel.label);
       const ucRel: UCRelationship = reverse
         ? {
             source: right.name,
@@ -513,7 +704,7 @@ export function parseUseCase(source: string): UseCaseAst {
             style: rel.style,
             sourceMarker: rel.targetMarker,
             targetMarker: rel.sourceMarker,
-            label: rel.label,
+            label,
           }
         : {
             source: left.name,
@@ -522,7 +713,7 @@ export function parseUseCase(source: string): UseCaseAst {
             style: rel.style,
             sourceMarker: rel.sourceMarker,
             targetMarker: rel.targetMarker,
-            label: rel.label,
+            label,
           };
       // Direction hints are layout suggestions on the source -> target axis
       // (PlantUML reads the qualifier as "place the target on this side of
@@ -530,6 +721,12 @@ export function parseUseCase(source: string): UseCaseAst {
       // the hint still refers to the visual source after normalization, so
       // we preserve it verbatim without flipping.
       if (rel.direction) ucRel.direction = rel.direction;
+      // Inline `#<styleBlock>` tokens are independent of arrow direction —
+      // they describe how the line is drawn, not which end it points at —
+      // so the reverse swap above does not affect them.
+      if (peeledStyle.lineColor) ucRel.lineColor = peeledStyle.lineColor;
+      if (peeledStyle.lineStyle) ucRel.lineStyle = peeledStyle.lineStyle;
+      if (peeledStyle.textColor) ucRel.textColor = peeledStyle.textColor;
       ast.relationships.push(ucRel);
     }
   }

@@ -61,16 +61,19 @@ export function drawLayeredEdge(
   const endMult = fromId === rel.source ? rel.targetMult : rel.sourceMult;
 
   const shortened = shortenPolyline(original, markerLength(startMarker), markerLength(endMarker));
-  const lineStyle: Style =
-    rel.style === 'dashed'
-      ? { stroke: style.color, strokeWidth: 1, strokeDasharray: '5,3', fill: 'none' }
-      : { stroke: style.color, strokeWidth: 1, fill: 'none' };
+  // Per-edge override (`rel.lineColor` / `rel.lineStyle` / `rel.textColor`)
+  // comes from PlantUML's inline `#<styleBlock>` (`#line:red;line.bold;text:red`).
+  // When absent we fall back to the diagram-wide `EdgeStyle` and the
+  // structural `rel.style` classification.
+  const strokeColor = rel.lineColor ?? style.color;
+  const markerColor = rel.lineColor ?? style.markerColor;
+  const lineStyle: Style = resolveLineStyle(rel, strokeColor);
 
   const shapes: Shape[] = [makeLine(shortened, lineStyle)];
 
-  const startMarkerShape = drawMarker(startMarker, original[0]!, original[1]!, style.markerColor);
+  const startMarkerShape = drawMarker(startMarker, original[0]!, original[1]!, markerColor);
   if (startMarkerShape) shapes.push(startMarkerShape);
-  const endMarkerShape = drawMarker(endMarker, original[original.length - 1]!, original[original.length - 2]!, style.markerColor);
+  const endMarkerShape = drawMarker(endMarker, original[original.length - 1]!, original[original.length - 2]!, markerColor);
   if (endMarkerShape) shapes.push(endMarkerShape);
 
   const pointsArr: Array<[number, number]> = original.map((v) => [v.x, v.y]);
@@ -82,15 +85,38 @@ export function drawLayeredEdge(
       original,
       lateralOffset,
     );
-    shapes.push({
-      type: 'text',
-      x: labelPlacement.x,
-      y: labelPlacement.y,
-      text: rel.label,
-      anchor: labelPlacement.anchor,
-      baseline: 'middle',
-      font: { family: style.fontFamily, size: style.labelFontSize, color: '#000' },
-    });
+    // Multi-line labels (real `\n` characters) split into stacked text shapes,
+    // vertically centered on the original placement point so the visual midpoint
+    // of the block still sits at the edge midpoint. Single-line labels keep
+    // their previous y to preserve baseline-compatible positioning.
+    const lines = rel.label.split('\n');
+    const labelColor = rel.textColor ?? '#000';
+    if (lines.length > 1) {
+      const lineHeight = style.labelFontSize * 1.2;
+      const totalH = lineHeight * lines.length;
+      const startY = labelPlacement.y - totalH / 2 + lineHeight / 2;
+      for (let i = 0; i < lines.length; i++) {
+        shapes.push({
+          type: 'text',
+          x: labelPlacement.x,
+          y: startY + i * lineHeight,
+          text: lines[i]!,
+          anchor: labelPlacement.anchor,
+          baseline: 'middle',
+          font: { family: style.fontFamily, size: style.labelFontSize, color: labelColor },
+        });
+      }
+    } else {
+      shapes.push({
+        type: 'text',
+        x: labelPlacement.x,
+        y: labelPlacement.y,
+        text: rel.label,
+        anchor: labelPlacement.anchor,
+        baseline: 'middle',
+        font: { family: style.fontFamily, size: style.labelFontSize, color: labelColor },
+      });
+    }
     const triangle = computeLabelDirectionTriangle(
       labelPlacement,
       rel,
@@ -136,16 +162,15 @@ export function drawLayeredSelfLoop(
     markerLength(rel.targetMarker),
   );
 
-  const lineStyle: Style =
-    rel.style === 'dashed'
-      ? { stroke: style.color, strokeWidth: 1, strokeDasharray: '5,3', fill: 'none' }
-      : { stroke: style.color, strokeWidth: 1, fill: 'none' };
+  const strokeColor = rel.lineColor ?? style.color;
+  const markerColor = rel.lineColor ?? style.markerColor;
+  const lineStyle: Style = resolveLineStyle(rel, strokeColor);
 
   const shapes: Shape[] = [makeLine(shortened, lineStyle)];
 
-  const startMarkerShape = drawMarker(rel.sourceMarker, original[0]!, original[1]!, style.markerColor);
+  const startMarkerShape = drawMarker(rel.sourceMarker, original[0]!, original[1]!, markerColor);
   if (startMarkerShape) shapes.push(startMarkerShape);
-  const endMarkerShape = drawMarker(rel.targetMarker, original[3]!, original[2]!, style.markerColor);
+  const endMarkerShape = drawMarker(rel.targetMarker, original[3]!, original[2]!, markerColor);
   if (endMarkerShape) shapes.push(endMarkerShape);
 
   if (rel.label) {
@@ -156,10 +181,38 @@ export function drawLayeredSelfLoop(
       text: rel.label,
       anchor: 'start',
       baseline: 'middle',
-      font: { family: style.fontFamily, size: style.labelFontSize, color: '#000' },
+      font: { family: style.fontFamily, size: style.labelFontSize, color: rel.textColor ?? '#000' },
     });
   }
   return shapes;
+}
+
+/**
+ * Compute the SVG `Style` for a relationship line, honouring an optional
+ * per-edge `rel.lineStyle` override (from PlantUML's inline `#<styleBlock>`):
+ *
+ * - `'bold'`   — solid stroke of width 2.
+ * - `'dotted'` — short-dash dasharray (`2,2`), width 1.
+ * - `'dashed'` — long-dash dasharray (`5,3`), width 1.
+ * - `'solid'`  — plain stroke of width 1.
+ *
+ * When no override is set, falls back to the structural `rel.style`
+ * (`'dashed'` ↔ long-dash, anything else ↔ solid) so existing diagrams render
+ * identically.
+ */
+function resolveLineStyle(rel: EdgeAttrs, stroke: string): Style {
+  const variant = rel.lineStyle ?? (rel.style === 'dashed' ? 'dashed' : 'solid');
+  switch (variant) {
+    case 'bold':
+      return { stroke, strokeWidth: 2, fill: 'none' };
+    case 'dotted':
+      return { stroke, strokeWidth: 1, strokeDasharray: '2,2', fill: 'none' };
+    case 'dashed':
+      return { stroke, strokeWidth: 1, strokeDasharray: '5,3', fill: 'none' };
+    case 'solid':
+    default:
+      return { stroke, strokeWidth: 1, fill: 'none' };
+  }
 }
 
 const LABEL_PERP_GAP = 8;

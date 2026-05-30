@@ -83,7 +83,6 @@ function buildGalleryCard(sample: Sample): HTMLElement {
 
   const ta = document.createElement('textarea');
   ta.className = 'gallery-source';
-  ta.readOnly = true;
   ta.spellcheck = false;
   ta.value = sample.source;
   body.appendChild(ta);
@@ -97,6 +96,18 @@ function buildGalleryCard(sample: Sample): HTMLElement {
   body.appendChild(preview);
 
   card.appendChild(body);
+
+  // Debounce re-renders on input so fast typing doesn't render on every keystroke.
+  let debounceHandle: number | undefined;
+  ta.addEventListener('input', () => {
+    if (debounceHandle !== undefined) {
+      window.clearTimeout(debounceHandle);
+    }
+    debounceHandle = window.setTimeout(() => {
+      debounceHandle = undefined;
+      renderInto(preview, ta.value);
+    }, 200);
+  });
 
   // Defer the actual render so the placeholder paints first.
   // Using requestAnimationFrame keeps the UI responsive when a kind has many samples.

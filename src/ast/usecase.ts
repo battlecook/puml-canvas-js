@@ -77,12 +77,47 @@ export interface UCRelationship {
    * on. Absent when the arrow had no hint.
    */
   direction?: RelationDirection;
+  /**
+   * Stroke color for the relationship line, parsed from an inline
+   * `#<styleBlock>` between the target and the optional `:` label. Recognised
+   * source forms include `#<colorName>` (bare colour) and `line:<colorName>`.
+   * Layout overrides the default edge stroke with this colour when set.
+   */
+  lineColor?: string;
+  /**
+   * Per-relationship line-style override parsed from the inline `#<styleBlock>`.
+   * `line.dashed` / `line.dotted` / `line.bold` map to the matching variants;
+   * the parser-level `style` (`solid` | `dashed`) is kept as the structural
+   * grammar's classification and remains untouched. Layout reads this field
+   * (if present) to pick the dasharray and stroke-width for rendering.
+   */
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold';
+  /**
+   * Text colour for the relationship label, from the inline `text:<colorName>`
+   * token of the `#<styleBlock>`. Layout uses this in place of the default
+   * label colour when set.
+   */
+  textColor?: string;
 }
 
 export interface UCContainer {
   id: string;
   label: string;
   childIds: string[];
+}
+
+/**
+ * Embedded JSON block (`json NAME { ... }`) inside a use-case diagram that
+ * enabled `allowmixing`. Stored separately from `nodes` because JSON blocks
+ * don't participate in the sugiyama layered layout — they're rendered as
+ * a standalone key/value table below the main diagram. `data` holds the
+ * `JSON.parse`d object/array (or `null` if the body was empty / invalid).
+ */
+export interface UCJsonNode {
+  id: string;
+  data: unknown;
+  /** Set when `JSON.parse` failed; layout renders an error scene instead. */
+  parseError?: string;
 }
 
 export interface UseCaseAst {
@@ -106,4 +141,11 @@ export interface UseCaseAst {
    * pick between stick-figure and `awesome` silhouette rendering.
    */
   skin?: Record<string, string>;
+  /**
+   * Embedded `json NAME { ... }` blocks introduced by `allowmixing`. Layout
+   * renders each as a standalone key/value table positioned below the main
+   * actor/usecase content. Empty / absent when the diagram had no JSON
+   * blocks.
+   */
+  jsonNodes?: UCJsonNode[];
 }

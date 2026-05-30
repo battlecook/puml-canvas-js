@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parseRegexPattern } from '../../src/layout/grammar/regex-expr.js';
+import { layoutRegex } from '../../src/layout/grammar/index.js';
+import { parseRegex } from '../../src/parser/grammar/regex.js';
 
 describe('regex expression parser', () => {
   it('parses a plain literal sequence', () => {
@@ -113,5 +115,37 @@ describe('regex expression parser', () => {
 
   it('handles unterminated \\Q by consuming to end of input', () => {
     expect(parseRegexPattern('\\Qfoo')).toEqual({ type: 'literal', value: 'foo' });
+  });
+
+  it('parses top-level alternation a|b into two literal branches', () => {
+    const e = parseRegexPattern('a|b');
+    expect(e?.type).toBe('alt');
+    if (e?.type === 'alt') {
+      expect(e.alternatives).toHaveLength(2);
+      expect(e.alternatives[0]).toEqual({ type: 'literal', value: 'a' });
+      expect(e.alternatives[1]).toEqual({ type: 'literal', value: 'b' });
+    }
+  });
+});
+
+describe('regex railroad layout', () => {
+  it('renders top-level a|b as a branching railroad', () => {
+    const src = `@startregex\ntitle alternation\na|b\n@endregex`;
+    const ast = parseRegex(src);
+    const scene = layoutRegex(ast);
+
+    const rects = scene.children.filter((s) => s.type === 'rect');
+    const paths = scene.children.filter((s) => s.type === 'path');
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+
+    // One rounded-rect terminal per alternative branch.
+    expect(rects.length).toBeGreaterThanOrEqual(2);
+    // Branch curves for the second alternative join the main line.
+    expect(paths.length).toBeGreaterThanOrEqual(2);
+    expect(texts).toContain('"a"');
+    expect(texts).toContain('"b"');
+    expect(texts).toContain('alternation');
   });
 });

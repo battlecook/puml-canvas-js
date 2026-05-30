@@ -27,6 +27,10 @@ export interface SkinTokens {
   lifelineBorderColor?: string;
   lifelineBackgroundColor?: string;
   handwritten?: boolean;
+  /** `skinparam actorStyle` value, lower-cased. Recognised values are
+   * `'awesome'` and `'hollow'`; anything else (or absent) means the default
+   * stick-figure rendering. */
+  actorStyle?: 'awesome' | 'hollow' | 'stickman';
 }
 
 /**
@@ -80,38 +84,57 @@ function fontFamily(name: string | undefined, role: 'participant' | 'actor'): st
   return `${quoted}, "Arial Black", Impact, sans-serif`;
 }
 
+/**
+ * Read a skin map value preferring the `sequence.<prop>` prefix (written by
+ * the shared `extractSkinparams` pre-pass when nested inside
+ * `skinparam sequence { ... }`) then falling back to the unprefixed top-level
+ * one-liner. `backgroundcolor` is intentionally lookup-up unprefixed only —
+ * the canvas background must come from a top-level `skinparam backgroundColor
+ * X`, not from a nested per-element fill.
+ */
+function pick(s: Record<string, string>, prop: string): string | undefined {
+  return s[`sequence.${prop}`] ?? s[prop];
+}
+
 export function buildSkin(ast: SequenceAst): SkinTokens {
   const s = ast.skin ?? {};
   const tokens: SkinTokens = {};
+  // Canvas background — top-level one-liner only.
   const bg = resolveColor(s['backgroundcolor']);
   if (bg) tokens.backgroundColor = bg;
-  const arrow = resolveColor(s['arrowcolor']);
+  const arrow = resolveColor(pick(s, 'arrowcolor'));
   if (arrow) tokens.arrowColor = arrow;
-  const pBg = resolveColor(s['participantbackgroundcolor']);
+  const pBg = resolveColor(pick(s, 'participantbackgroundcolor'));
   if (pBg) tokens.participantBackgroundColor = pBg;
-  const pBorder = resolveColor(s['participantbordercolor']);
+  const pBorder = resolveColor(pick(s, 'participantbordercolor'));
   if (pBorder) tokens.participantBorderColor = pBorder;
-  const pFc = resolveColor(s['participantfontcolor']);
+  const pFc = resolveColor(pick(s, 'participantfontcolor'));
   if (pFc) tokens.participantFontColor = pFc;
-  const pFs = num(s['participantfontsize']);
+  const pFs = num(pick(s, 'participantfontsize'));
   if (pFs !== undefined) tokens.participantFontSize = pFs;
-  const pFn = fontFamily(s['participantfontname'], 'participant');
+  const pFn = fontFamily(pick(s, 'participantfontname'), 'participant');
   if (pFn) tokens.participantFontName = pFn;
-  const aBg = resolveColor(s['actorbackgroundcolor']);
+  const aBg = resolveColor(pick(s, 'actorbackgroundcolor'));
   if (aBg) tokens.actorBackgroundColor = aBg;
-  const aBorder = resolveColor(s['actorbordercolor']);
+  const aBorder = resolveColor(pick(s, 'actorbordercolor'));
   if (aBorder) tokens.actorBorderColor = aBorder;
-  const aFc = resolveColor(s['actorfontcolor']);
+  const aFc = resolveColor(pick(s, 'actorfontcolor'));
   if (aFc) tokens.actorFontColor = aFc;
-  const aFs = num(s['actorfontsize']);
+  const aFs = num(pick(s, 'actorfontsize'));
   if (aFs !== undefined) tokens.actorFontSize = aFs;
-  const aFn = fontFamily(s['actorfontname'], 'actor');
+  const aFn = fontFamily(pick(s, 'actorfontname'), 'actor');
   if (aFn) tokens.actorFontName = aFn;
-  const llBorder = resolveColor(s['lifelinebordercolor']);
+  const llBorder = resolveColor(pick(s, 'lifelinebordercolor'));
   if (llBorder) tokens.lifelineBorderColor = llBorder;
-  const llBg = resolveColor(s['lifelinebackgroundcolor']);
+  const llBg = resolveColor(pick(s, 'lifelinebackgroundcolor'));
   if (llBg) tokens.lifelineBackgroundColor = llBg;
   if (s['handwritten']?.toLowerCase() === 'true') tokens.handwritten = true;
+  const rawActorStyle = pick(s, 'actorstyle')?.toLowerCase();
+  if (rawActorStyle === 'awesome' || rawActorStyle === 'hollow') {
+    tokens.actorStyle = rawActorStyle;
+  } else if (rawActorStyle === 'stickman') {
+    tokens.actorStyle = 'stickman';
+  }
   return tokens;
 }
 

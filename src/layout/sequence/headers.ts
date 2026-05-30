@@ -14,7 +14,6 @@ const BOLD_LINE_HEIGHT = 18;
 const SECTION_DIVIDER_GAP = 6;
 const SECTION_PAD_Y = 6;
 const COLOR_FILL = '#fefece';
-const COLOR_SECTIONED_FILL = '#e2e2f0';
 const COLOR_LINE = '#222';
 
 // Stereotype row above the participant name. The spot is a small filled circle
@@ -119,7 +118,12 @@ export function drawHeader(
 ): Shape[] {
   const skin = getSkin();
   if (p.sections && p.sections.length > 0) {
-    return drawSectioned(p.sections, cx, w, y, p.color ?? COLOR_SECTIONED_FILL);
+    // Multi-line `participant Foo [ ... ]` uses the same default fill as a
+    // single-line participant — PlantUML does not give the sectioned form a
+    // distinct gray background. Per-participant `#color` and the
+    // `participantBackgroundColor` skinparam still take precedence.
+    const sectionedFill = p.color ?? skin.participantBackgroundColor ?? COLOR_FILL;
+    return drawSectioned(p.sections, cx, w, y, sectionedFill);
   }
   // For actors, the explicit `actor X #color` directive still wins, but the
   // ambient skinparam fills in when no per-actor color was given.
@@ -359,6 +363,10 @@ function headerParticipant(
 }
 
 function headerActor(label: string, cx: number, y: number, h: number, fill: string): Shape[] {
+  const skin = getSkin();
+  const style = skin.actorStyle;
+  if (style === 'awesome') return headerActorAwesome(label, cx, y, h, fill);
+  if (style === 'hollow') return headerActorHollow(label, cx, y, h);
   const top = y + 4;
   const strokeColor = headerStroke('actor');
   const stroke = { stroke: strokeColor, strokeWidth: 1 };
@@ -368,6 +376,86 @@ function headerActor(label: string, cx: number, y: number, h: number, fill: stri
     { type: 'line', x1: cx - 9, y1: top + 16, x2: cx + 9, y2: top + 16, style: stroke },
     { type: 'line', x1: cx, y1: top + 24, x2: cx - 7, y2: top + 32, style: stroke },
     { type: 'line', x1: cx, y1: top + 24, x2: cx + 7, y2: top + 32, style: stroke },
+    ...labelBelow(label, cx, y, h, 'actor'),
+  ];
+}
+
+/** Awesome silhouette variant of the sequence-header actor: filled head circle
+ * over a rounded-top torso rect. Geometry is scaled down (relative to the
+ * use-case version) to fit inside the existing 32px header symbol band so the
+ * header height math is unchanged. */
+function headerActorAwesome(label: string, cx: number, y: number, h: number, fill: string): Shape[] {
+  const top = y + 4;
+  const headR = 5;
+  const headCy = top + headR;
+  const torsoW = 14;
+  const torsoH = 12;
+  const torsoX = cx - torsoW / 2;
+  const torsoY = headCy + headR - 1;
+  const skin = getSkin();
+  const strokeColor = skin.actorBorderColor ?? '#888';
+  const fillColor = skin.actorBackgroundColor ?? fill ?? '#E0E0E0';
+  const style = { fill: fillColor, stroke: strokeColor, strokeWidth: 1 };
+  return [
+    { type: 'circle', cx, cy: headCy, r: headR, style },
+    {
+      type: 'rect',
+      x: torsoX,
+      y: torsoY,
+      w: torsoW,
+      h: torsoH,
+      rx: torsoW / 2,
+      ry: torsoW / 2,
+      style,
+    },
+    ...labelBelow(label, cx, y, h, 'actor'),
+  ];
+}
+
+/** Hollow silhouette variant: a stylized "person" icon — a small round head
+ * over a rounded dome-shaped torso (shoulders rising into raised-arm curves),
+ * with two short leg strokes below. White interior with a gray outline. */
+function headerActorHollow(label: string, cx: number, y: number, h: number): Shape[] {
+  const top = y + 4;
+  const strokeColor = headerStroke('actor');
+  const stroke = { stroke: strokeColor, strokeWidth: 1.5 };
+  const fillStroke = { fill: '#FFFFFF', ...stroke };
+
+  // Head: a slightly larger circle than the stickman for the silhouette look.
+  const headR = 6;
+  const headCy = top + headR;
+
+  // Torso/shoulders polygon: a rounded dome that flares outward at the
+  // shoulders. Coordinates trace (left-arm-out, up to neck, over to
+  // right-arm-out, down to right hip, across to left hip, back to start).
+  const shoulderY = headCy + headR + 1;
+  const hipY = top + 26;
+  const torsoHalf = 10;
+  const neckHalf = 3;
+  const hipHalf = 6;
+
+  // Body polygon — 6 corners, a "person silhouette" torso with shoulders and
+  // a tapered waist.
+  const torso: Shape = {
+    type: 'polygon',
+    points: [
+      [cx - torsoHalf, shoulderY + 3], // left shoulder/arm tip
+      [cx - neckHalf, shoulderY],      // left neck
+      [cx + neckHalf, shoulderY],      // right neck
+      [cx + torsoHalf, shoulderY + 3], // right shoulder/arm tip
+      [cx + hipHalf, hipY],            // right hip
+      [cx - hipHalf, hipY],            // left hip
+    ],
+    style: fillStroke,
+  };
+
+  // Two short leg strokes below the hips.
+  const legBottom = top + 32;
+  return [
+    { type: 'circle', cx, cy: headCy, r: headR, style: fillStroke },
+    torso,
+    { type: 'line', x1: cx - 4, y1: hipY, x2: cx - 5, y2: legBottom, style: stroke },
+    { type: 'line', x1: cx + 4, y1: hipY, x2: cx + 5, y2: legBottom, style: stroke },
     ...labelBelow(label, cx, y, h, 'actor'),
   ];
 }

@@ -108,7 +108,9 @@ export function parseDeployment(source: string): ContainerAst {
     normalizeEndpoint(raw) {
       const t = raw.trim();
       if (t.startsWith('[') && t.endsWith(']')) {
-        return { name: t.slice(1, -1).trim(), nodeKind: 'component' };
+        // `[Name]` is an explicit shorthand declaration; join the active
+        // container (Bug C).
+        return { name: t.slice(1, -1).trim(), nodeKind: 'component', explicit: true };
       }
       return { name: t };
     },

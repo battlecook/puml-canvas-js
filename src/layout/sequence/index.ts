@@ -2,6 +2,7 @@ import type {
   ArrowMarker,
   DividerStmt,
   GroupKind,
+  MessageStmt,
   NoteStmt,
   RefStmt,
   SequenceAst,
@@ -10,7 +11,7 @@ import type {
 import type { Scene, Shape } from '../../scene/types.js';
 import { measureText } from './measure.js';
 import { drawHeader, maxHeaderHeight, participantContentWidth } from './headers.js';
-import { parseLabelMarkup, drawLabelSpans } from './markup.js';
+import { parseLabelMarkup, drawLabelSpans, measureSpansWidth } from './markup.js';
 import {
   buildSkin, setSkin, clearSkin, getSkin,
   buildStyles, setStyles, clearStyles, getStyles,
@@ -26,7 +27,7 @@ const BOTTOM_PAD = 12;
 const SIDE_PAD = 12;
 const HEADER_PAD_X = 16;
 const LANE_MIN_WIDTH = 80;
-const LANE_GAP = 50;
+const LANE_GAP = 90;
 const MSG_GAP = 36;
 // `A ->(N) B` — pixels of vertical slope per N unit. The arrow's head lands
 // `N * DURATION_SCALE` pixels below its tail; layout reserves that extra
@@ -41,6 +42,23 @@ const NOTE_PAD_Y = 6;
 const NOTE_FOLD = 6;
 const NOTE_GAP = 30;
 const NOTE_SIDE_OFFSET = 8;
+// Horizontal gap between two side-by-side notes placed on the same row by the
+// `/` directive. Without this, two `note over A` / `note over B` pairs whose
+// natural lane spans overlap would visually merge into a single rectangle.
+const NOTE_HGAP = 6;
+// Maximum pixel width for a single line of note body text. Longer lines are
+// auto-wrapped on word boundaries by `wrapNoteText` to match PlantUML's note
+// rendering, which caps notes at roughly this width before wrapping. Tuned
+// to ~250 px so that conventional one-sentence note lines (the
+// `note right; the %autonumber% works everywhere.` style used widely in
+// PlantUML examples) stay on a single line while truly-long single-line
+// bodies — the kind that read as a paragraph — wrap to several lines.
+const MAX_NOTE_W = 250;
+// Vertical gap from a message arrow's y to the top of a note that is
+// rendered "attached" to that message. Notes immediately following a message
+// (via the shorthand `note left` / `note right`) hug the arrow at this
+// offset instead of being pushed down by a full MSG_GAP + NOTE_GAP.
+const NOTE_ATTACH_OFFSET = 4;
 const ACT_WIDTH = 10;
 const GROUP_PAD = 10;
 const GROUP_HEADER_HEIGHT = 18;
@@ -109,9 +127,18 @@ const COLOR_DIVIDER_FILL = '#dddddd';
 interface PendingGroup {
   kind: GroupKind;
   label: string;
+  /** Optional secondary annotation parsed from `... [bracketed]`. Rendered
+   *  to the right of the bold tab keyword (e.g. `loop` tab + `[1000 times]`). */
+  label2?: string;
   yStart: number;
   minLane: number;
   maxLane: number;
+  /** Extra pixel extents from inner content that overflows the lane span —
+   *  e.g. an attached `note left` / `note right` whose box reaches beyond
+   *  the leftmost / rightmost lane's header. When set, the drawn group rect
+   *  grows to include these x's so the inner notes stay inside the frame. */
+  leftX?: number;
+  rightX?: number;
   dividers: Array<{ y: number; label: string }>;
   /** Optional fill for the folded-corner tab. */
   tabColor?: string;
@@ -164,6 +191,7 @@ function isReferenced(id: string, stmts: SequenceStatement[]): boolean {
         break;
       case 'activate':
       case 'deactivate':
+      case 'destroy':
         if (s.target === id) return true;
         break;
       case 'note':
@@ -220,6 +248,35 @@ function doLayoutSequence(ast: SequenceAst): Scene {
   );
 
   const laneIdx = new Map<string, number>(parts.map((p, i) => [p.id, i]));
+
+  // Re-target shorthand `note left` / `note right` to the lane-order outer
+  // endpoint of the preceding message. The parser resolves `note left` to
+  // `last.from` and `note right` to `last.to`, but those are SOURCE/TARGET —
+  // not necessarily lane-order LEFT/RIGHT. For a right-to-left message like
+  // `Bob -> Alice` (where Alice is declared first), `note right` should sit
+  // on the OUTER right of the diagram, i.e. to the right of Bob, not between
+  // Alice and Bob. Mutates the AST in place; subsequent width pre-passes
+  // observe the corrected target.
+  {
+    let prevMsg: MessageStmt | null = null;
+    for (const s of ast.statements) {
+      if (s.type === 'message' && !s.fromBoundary && !s.toBoundary) {
+        prevMsg = s;
+        continue;
+      }
+      if (s.type !== 'note' || !s.shorthand || !prevMsg) continue;
+      if (s.position !== 'left' && s.position !== 'right') continue;
+      const fi = laneIdx.get(prevMsg.from);
+      const ti = laneIdx.get(prevMsg.to);
+      if (fi === undefined || ti === undefined) continue;
+      // For a self-message (`A -> A`), source == target — both candidates
+      // resolve to the same participant, so the lane-order tie is fine.
+      const leftId = fi <= ti ? prevMsg.from : prevMsg.to;
+      const rightId = fi >= ti ? prevMsg.from : prevMsg.to;
+      s.targets = [s.position === 'left' ? leftId : rightId];
+    }
+  }
+
   const labels = precomputeMessageLabels(ast.statements);
   const gaps = computeLaneGaps(ast.statements, labels, laneIdx, headerW, parts.length);
 
@@ -248,11 +305,13 @@ function doLayoutSequence(ast: SequenceAst): Scene {
   // computes the note's x as `laneCenter[0] - headerW[0]/2 - noteW - SIDE_OFFSET`
   // and laneCenter[0] = SIDE_PAD + leftExtra + headerW[0]/2, so we need
   // leftExtra ≥ noteW + SIDE_OFFSET for the note to stay within the SVG.
-  for (const stmt of ast.statements) {
+  for (let si = 0; si < ast.statements.length; si++) {
+    const stmt = ast.statements[si]!;
     if (stmt.type !== 'note' || stmt.position !== 'left') continue;
     const idx = laneIdx.get(stmt.targets[0]);
     if (idx !== 0) continue;
-    const lines = stmt.text ? stmt.text.split('\n') : [];
+    const noteText = labels[si] ?? stmt.text;
+    const lines = noteText ? noteText.split('\n') : [];
     let maxLineW = 0;
     for (const line of lines) {
       const w = measureText(line, FONT_SIZE).width;
@@ -303,6 +362,50 @@ function doLayoutSequence(ast: SequenceAst): Scene {
     if (halfOverflow > leftExtra) leftExtra = halfOverflow;
   }
 
+  // `note over X` (single target) centers its box on X's lane center with
+  // width = textW = maxLineW + NOTE_PAD_X*2 (+ hnote shapePad). When X is the
+  // LEFTMOST lane and the note body is wider than X's header, the note's left
+  // edge bleeds past SIDE_PAD and gets clipped. Grow leftExtra so the bleed
+  // is absorbed by the left margin. Mirrors the right-side widening pass that
+  // runs after laneCenters are assigned.
+  // Two-target `note over A, B` spans from A's left header edge to B's right
+  // header edge. If textW exceeds that span and A is the leftmost lane, the
+  // note grows symmetrically about the span center, again bleeding left.
+  for (let si = 0; si < ast.statements.length; si++) {
+    const stmt = ast.statements[si]!;
+    if (stmt.type !== 'note' || stmt.position !== 'over') continue;
+    const idx1 = laneIdx.get(stmt.targets[0]!);
+    if (idx1 === undefined) continue;
+    const noteText = labels[si] ?? stmt.text;
+    const lines = noteText ? noteText.split('\n') : [''];
+    let maxLineW = 0;
+    for (const line of lines) {
+      const w = measureText(line, FONT_SIZE).width;
+      if (w > maxLineW) maxLineW = w;
+    }
+    const shapePad = stmt.shape === 'hnote' ? 16 : 0;
+    const noteW = maxLineW + NOTE_PAD_X * 2 + shapePad;
+    if (stmt.targets.length === 2) {
+      const idx2 = laneIdx.get(stmt.targets[1]!) ?? idx1;
+      const lo = Math.min(idx1, idx2);
+      if (lo !== 0) continue;
+      // Span width from leftmost-header-left to rightmost-header-right. For
+      // the two-lane case the lanes contribute headerW[lo]/2 + headerW[hi]/2
+      // plus the inter-lane gaps + intermediate header widths. We don't yet
+      // know gaps[lo..hi-1] at this point, but for the leftmost lane's bleed
+      // only the half-overflow ((noteW - spanW)/2) matters and that's
+      // bounded above by max(0, noteW/2 - headerW[lo]/2) — using the cheaper
+      // half-header lower bound is safe (over-pads slightly only when the
+      // span already covers the overflow, which is harmless).
+      const required = noteW / 2 - headerW[lo]! / 2;
+      if (required > leftExtra) leftExtra = required;
+    } else {
+      if (idx1 !== 0) continue;
+      const required = noteW / 2 - headerW[0]! / 2;
+      if (required > leftExtra) leftExtra = required;
+    }
+  }
+
   const laneCenters: number[] = [];
   let cursorX = SIDE_PAD + leftExtra;
   for (let i = 0; i < parts.length; i++) {
@@ -332,11 +435,13 @@ function doLayoutSequence(ast: SequenceAst): Scene {
     if (rightEdge > diagramWidth) diagramWidth = rightEdge;
   }
   // `note right of X` extends to the right of the lifeline. Grow width.
-  for (const stmt of ast.statements) {
+  for (let si = 0; si < ast.statements.length; si++) {
+    const stmt = ast.statements[si]!;
     if (stmt.type !== 'note' || stmt.position !== 'right') continue;
     const idx = laneIdx.get(stmt.targets[0]!);
     if (idx === undefined) continue;
-    const lines = stmt.text ? stmt.text.split('\n') : [];
+    const noteText = labels[si] ?? stmt.text;
+    const lines = noteText ? noteText.split('\n') : [];
     let maxLineW = 0;
     for (const line of lines) {
       const w = measureText(line, FONT_SIZE).width;
@@ -345,6 +450,87 @@ function doLayoutSequence(ast: SequenceAst): Scene {
     const noteW = maxLineW + NOTE_PAD_X * 2;
     const rightEdge =
       laneCenters[idx]! + headerW[idx]! / 2 + NOTE_SIDE_OFFSET + noteW + SIDE_PAD;
+    if (rightEdge > diagramWidth) diagramWidth = rightEdge;
+  }
+  // `note over X` (single target) on the RIGHTMOST lane: when the body is
+  // wider than the header, the note bleeds right past the diagram edge and
+  // clips. `note over A, B` whose rightmost target is the rightmost lane has
+  // the same problem when textW exceeds the inter-lane span. Mirrors the
+  // pre-laneCenters left-bleed pass above.
+  for (let si = 0; si < ast.statements.length; si++) {
+    const stmt = ast.statements[si]!;
+    if (stmt.type !== 'note' || stmt.position !== 'over') continue;
+    const idx1 = laneIdx.get(stmt.targets[0]!);
+    if (idx1 === undefined) continue;
+    const noteText = labels[si] ?? stmt.text;
+    const lines = noteText ? noteText.split('\n') : [''];
+    let maxLineW = 0;
+    for (const line of lines) {
+      const w = measureText(line, FONT_SIZE).width;
+      if (w > maxLineW) maxLineW = w;
+    }
+    const shapePad = stmt.shape === 'hnote' ? 16 : 0;
+    const noteW = maxLineW + NOTE_PAD_X * 2 + shapePad;
+    if (stmt.targets.length === 2) {
+      const idx2 = laneIdx.get(stmt.targets[1]!) ?? idx1;
+      const lo = Math.min(idx1, idx2);
+      const hi = Math.max(idx1, idx2);
+      if (hi !== parts.length - 1) continue;
+      const spanLeft = laneCenters[lo]! - headerW[lo]! / 2;
+      const spanRight = laneCenters[hi]! + headerW[hi]! / 2;
+      const spanW = spanRight - spanLeft;
+      if (noteW <= spanW) continue;
+      const halfOverflow = (noteW - spanW) / 2;
+      const rightEdge = spanRight + halfOverflow + SIDE_PAD;
+      if (rightEdge > diagramWidth) diagramWidth = rightEdge;
+    } else {
+      if (idx1 !== parts.length - 1) continue;
+      const rightEdge = laneCenters[idx1]! + noteW / 2 + SIDE_PAD;
+      if (rightEdge > diagramWidth) diagramWidth = rightEdge;
+    }
+  }
+  // `/` directive — when two `note over X` / `note over Y` statements share a
+  // row, the second note is shifted right by `drawNote`'s caller so its left
+  // edge clears the first note's right edge by `NOTE_HGAP`. If the second note
+  // sits on the rightmost lane, this shift can push it past `diagramWidth`;
+  // grow the diagram so the shifted note isn't clipped. Only single-target
+  // `over` notes are considered — multi-target / `across` already account for
+  // the relevant lane span and rarely participate in `/` chains.
+  for (let si = 1; si < ast.statements.length; si++) {
+    const stmt = ast.statements[si]!;
+    if (stmt.type !== 'note' || stmt.alignToPrev !== true) continue;
+    if (stmt.position !== 'over' || stmt.targets.length !== 1) continue;
+    // Find the immediately preceding note (skipping comments/labels that
+    // weren't filtered out — `alignToPrev` is only set when there IS a prior
+    // note, so this loop terminates).
+    let prev: NoteStmt | null = null;
+    for (let pj = si - 1; pj >= 0; pj--) {
+      const p = ast.statements[pj]!;
+      if (p.type === 'note') { prev = p; break; }
+    }
+    if (!prev || prev.position !== 'over' || prev.targets.length !== 1) continue;
+    const prevIdx = laneIdx.get(prev.targets[0]!);
+    const curIdx = laneIdx.get(stmt.targets[0]!);
+    if (prevIdx === undefined || curIdx === undefined) continue;
+    // Measure both notes' natural widths.
+    const measureNoteW = (s: NoteStmt, idx: number): number => {
+      const t = labels[idx] ?? s.text;
+      const ls = t ? t.split('\n') : [''];
+      let mw = 0;
+      for (const ln of ls) {
+        const w = measureText(ln, FONT_SIZE).width;
+        if (w > mw) mw = w;
+      }
+      const pad = s.shape === 'hnote' ? 16 : 0;
+      return mw + NOTE_PAD_X * 2 + pad;
+    };
+    const prevW = measureNoteW(prev, si - 1);
+    const curW = measureNoteW(stmt, si);
+    const prevLeft = laneCenters[prevIdx]! - prevW / 2;
+    const prevRight = prevLeft + prevW;
+    const curNaturalLeft = laneCenters[curIdx]! - curW / 2;
+    const shiftedLeft = Math.max(curNaturalLeft, prevRight + NOTE_HGAP);
+    const rightEdge = shiftedLeft + curW + SIDE_PAD;
     if (rightEdge > diagramWidth) diagramWidth = rightEdge;
   }
   // Single-lane `ref over X` — if the body is wider than X's header, the
@@ -399,9 +585,11 @@ function doLayoutSequence(ast: SequenceAst): Scene {
   }
 
   // `note across` spans the full diagram. Grow width to fit the text.
-  for (const stmt of ast.statements) {
+  for (let si = 0; si < ast.statements.length; si++) {
+    const stmt = ast.statements[si]!;
     if (stmt.type !== 'note' || stmt.position !== 'across') continue;
-    const lines = stmt.text ? stmt.text.split('\n') : [];
+    const noteText = labels[si] ?? stmt.text;
+    const lines = noteText ? noteText.split('\n') : [];
     let maxLineW = 0;
     for (const line of lines) {
       const w = measureText(line, FONT_SIZE).width;
@@ -458,12 +646,31 @@ function doLayoutSequence(ast: SequenceAst): Scene {
   let autoActive = false;
   const groupStack: PendingGroup[] = [];
   // Each entry tracks the vertical range of a single page so we can draw
-  // separate lifelines + top/bottom headers per page.
+  // separate lifelines + top/bottom headers per page. To mirror PlantUML's
+  // standard single-image preview, `newpage` truncates the diagram at the
+  // first page — so `pages` always ends up with exactly one entry.
   const pages: Array<{ topY: number; bottomY: number }> = [];
-  let pageTopY = headerTopY;
-  const PAGE_GAP = 24;
+  const pageTopY = headerTopY;
 
   let y = headerTopY + headerH + MSG_GAP / 2;
+
+  // y-coordinate of the most recently drawn message arrow's body line, used
+  // to anchor shorthand `note left` / `note right` notes adjacent to that
+  // message instead of pushing them down by the full MSG_GAP + NOTE_GAP. Set
+  // by the message handler immediately after `drawMessage` runs; consumed
+  // (and cleared) by the next 'note' iteration that wants to attach.
+  let lastMessageArrowY: number | null = null;
+
+  // y-coordinate (top) of the most recently drawn note, used to honour the
+  // `/` directive that asks the next note to share the same y as the previous
+  // one (side-by-side notes). Stale values are harmless because only the
+  // `alignToPrev` consumer reads it.
+  let lastNoteY: number | null = null;
+  // x-coordinate (right edge) of the most recently drawn note, paired with
+  // `lastNoteY` for the `/` directive: a side-by-side note whose natural
+  // (lane-centered) left edge would overlap this value gets shifted right by
+  // enough to leave at least NOTE_HGAP between the two notes' rectangles.
+  let lastNoteRight: number | null = null;
 
   const touch = (...idxs: number[]): void => {
     for (const g of groupStack) {
@@ -474,60 +681,47 @@ function doLayoutSequence(ast: SequenceAst): Scene {
     }
   };
 
-  for (let i = 0; i < ast.statements.length; i++) {
+  // Like `touch` but for explicit pixel extents — used when inner content
+  // (e.g. a `note left` / `note right` attached to a message inside a
+  // partition) reaches beyond the natural lane span of the group. Grows the
+  // group's drawn rect so the inner shape stays within the frame.
+  const touchX = (leftX: number, rightX: number): void => {
+    for (const g of groupStack) {
+      if (g.leftX === undefined || leftX < g.leftX) g.leftX = leftX;
+      if (g.rightX === undefined || rightX > g.rightX) g.rightX = rightX;
+    }
+  };
+
+  stmtLoop: for (let i = 0; i < ast.statements.length; i++) {
     const stmt = ast.statements[i]!;
+    // Only a note immediately following a message benefits from the attach
+    // offset. Any other statement type (group open/close, divider, ref,
+    // activate, …) breaks the chain, so we drop the recorded arrow y here.
+    // The message handler re-sets it after drawing.
+    if (stmt.type !== 'note' && stmt.type !== 'message' && stmt.type !== 'autonumber') {
+      lastMessageArrowY = null;
+    }
     switch (stmt.type) {
       case 'autonumber':
         break;
 
-      case 'newpage': {
-        // Close any activations and groups still open on the current page.
-        const pageBottomY = y;
-        for (let li = 0; li < parts.length; li++) {
-          while (actStack[li]!.length > 0) {
-            const frame = actStack[li]!.pop()!;
-            finalizedActs.push({
-              laneIdx: li, level: actStack[li]!.length,
-              yStart: frame.yStart, yEnd: pageBottomY, color: frame.color,
-            });
-          }
-        }
-        callStack.length = 0;
-        while (groupStack.length > 0) {
-          const g = groupStack.pop()!;
-          if (g.minLane > g.maxLane) { g.minLane = 0; g.maxLane = parts.length - 1; }
-          body.push(...drawGroup(g, pageBottomY + GROUP_PAD, laneCenters, headerW));
-        }
-        pages.push({ topY: pageTopY, bottomY: pageBottomY });
-
-        // Start a new page below the previous one.
-        y = pageBottomY + headerH + PAGE_GAP;
-        if (stmt.title) {
-          const titleLines = stmt.title.split('\n');
-          const titleLineH = Math.ceil(TITLE_FONT_SIZE * 1.2);
-          for (let ti = 0; ti < titleLines.length; ti++) {
-            pageTitleShapes.push({
-              type: 'text',
-              x: diagramWidth / 2,
-              y: y + (ti + 1) * titleLineH - 2,
-              text: titleLines[ti]!,
-              anchor: 'middle',
-              baseline: 'alphabetic',
-              font: { family: FONT_FAMILY, size: TITLE_FONT_SIZE, weight: 'bold', color: '#000' },
-            });
-          }
-          y += titleLines.length * titleLineH + TITLE_GAP;
-        }
-        pageTopY = y;
-        y += headerH + MSG_GAP / 2;
-        break;
-      }
+      case 'newpage':
+        // `ignore newpage` (diagram-level) silently drops every newpage so the
+        // diagram renders as one continuous page. Otherwise we mirror
+        // PlantUML's standard single-image preview: stop processing at the
+        // first `newpage`, leaving open activations/groups for the post-loop
+        // finalization to close.
+        if (ast.ignoreNewpage) continue stmtLoop;
+        break stmtLoop;
 
       case 'activate': {
         const idx = laneIdx.get(stmt.target);
         if (idx === undefined) break;
         touch(idx);
-        actStack[idx]!.push({ yStart: y - MSG_GAP / 2, color: COLOR_ACTIVATION_FILL });
+        actStack[idx]!.push({
+          yStart: y - MSG_GAP / 2,
+          color: stmt.color ?? COLOR_ACTIVATION_FILL,
+        });
         break;
       }
 
@@ -542,6 +736,30 @@ function doLayoutSequence(ast: SequenceAst): Scene {
             level: actStack[idx]!.length,
             yStart: frame.yStart,
             yEnd: y - MSG_GAP / 2,
+            color: frame.color,
+          });
+        }
+        break;
+      }
+
+      case 'destroy': {
+        // Standalone `destroy NAME` — distinct from the `!!` message suffix.
+        // Drop a red X marker on NAME's lifeline at the current y, finalise
+        // any open activations, and truncate the lifeline below that point so
+        // the bottom header is also suppressed.
+        const idx = laneIdx.get(stmt.target);
+        if (idx === undefined) break;
+        touch(idx);
+        const markY = y - MSG_GAP / 2;
+        destroyMarks.push({ laneIdx: idx, y: markY });
+        diedY[idx] = markY + 8;
+        while (actStack[idx]!.length > 0) {
+          const frame = actStack[idx]!.pop()!;
+          finalizedActs.push({
+            laneIdx: idx,
+            level: actStack[idx]!.length,
+            yStart: frame.yStart,
+            yEnd: markY,
             color: frame.color,
           });
         }
@@ -606,6 +824,7 @@ function doLayoutSequence(ast: SequenceAst): Scene {
           dividers: [],
           branchColors: [stmt.branchColor],
         };
+        if (stmt.label2) pg.label2 = stmt.label2;
         if (stmt.tabColor) pg.tabColor = stmt.tabColor;
         groupStack.push(pg);
         y += GROUP_HEADER_HEIGHT + GROUP_PAD;
@@ -630,7 +849,19 @@ function doLayoutSequence(ast: SequenceAst): Scene {
             g.minLane = 0;
             g.maxLane = parts.length - 1;
           }
-          if (groupStack.length > 0) touch(g.minLane, g.maxLane);
+          if (groupStack.length > 0) {
+            touch(g.minLane, g.maxLane);
+            // Propagate the closed group's pixel extents to the outer group so
+            // any note overflow inside the nested group also grows the outer
+            // frame.
+            if (g.leftX !== undefined || g.rightX !== undefined) {
+              const innerLeft = g.leftX
+                ?? (laneCenters[g.minLane]! - headerW[g.minLane]! / 2);
+              const innerRight = g.rightX
+                ?? (laneCenters[g.maxLane]! + headerW[g.maxLane]! / 2);
+              touchX(innerLeft, innerRight);
+            }
+          }
           body.push(...drawGroup(g, yEnd, laneCenters, headerW));
           y = yEnd + MSG_GAP / 2;
         }
@@ -668,12 +899,105 @@ function doLayoutSequence(ast: SequenceAst): Scene {
             touch(idx1);
           }
         }
+        // Grow the enclosing group's pixel extents to fit the note's bbox.
+        // `note left` / `note right` attached to a message inside a partition
+        // can reach beyond the partition's natural lane span; without this
+        // the note would render outside the partition's drawn frame.
+        if (groupStack.length > 0 && idx1 !== undefined) {
+          const noteText = labels[i] ?? stmt.text;
+          const noteLines = noteText ? noteText.split('\n') : [''];
+          let maxLineW = 0;
+          for (const line of noteLines) {
+            const w = measureText(line, FONT_SIZE).width;
+            if (w > maxLineW) maxLineW = w;
+          }
+          const shapePad = stmt.shape === 'hnote' ? 16 : 0;
+          const noteW = maxLineW + NOTE_PAD_X * 2 + shapePad;
+          if (stmt.position === 'left') {
+            const nx = laneCenters[idx1]! - headerW[idx1]! / 2 - noteW - NOTE_SIDE_OFFSET;
+            touchX(nx, nx + noteW);
+          } else if (stmt.position === 'right') {
+            const nx = laneCenters[idx1]! + headerW[idx1]! / 2 + NOTE_SIDE_OFFSET;
+            touchX(nx, nx + noteW);
+          } else if (stmt.position === 'over') {
+            let spanLeft: number;
+            let spanRight: number;
+            if (stmt.targets.length === 2) {
+              const idx2 = laneIdx.get(stmt.targets[1]!) ?? idx1;
+              const lo = Math.min(idx1, idx2);
+              const hi = Math.max(idx1, idx2);
+              spanLeft = laneCenters[lo]! - headerW[lo]! / 2;
+              spanRight = laneCenters[hi]! + headerW[hi]! / 2;
+            } else {
+              spanLeft = laneCenters[idx1]! - noteW / 2;
+              spanRight = laneCenters[idx1]! + noteW / 2;
+            }
+            const drawnW = Math.max(noteW, spanRight - spanLeft);
+            const cx = (spanLeft + spanRight) / 2;
+            touchX(cx - drawnW / 2, cx + drawnW / 2);
+          }
+        }
+        // Shorthand `note left` / `note right` immediately after a message
+        // should hug that message's arrow, not be pushed down by MSG_GAP.
+        // Use lastMessageArrowY (the arrow's body y) plus a tiny offset so
+        // the note sits flush with the arrow line. After the note, advance y
+        // to whichever is greater — the natural cursor (so subsequent stmts
+        // still flow correctly) or the note's bottom plus a half-gap.
+        const attach =
+          stmt.shorthand === true &&
+          lastMessageArrowY !== null &&
+          (stmt.position === 'left' || stmt.position === 'right');
+        // `/` directive — this note shares the previous note's y so the two
+        // sit side-by-side on the same row. Overrides the normal y cursor
+        // and the shorthand-attach offset.
+        const alignToPrev: boolean = stmt.alignToPrev === true && lastNoteY !== null;
+        const noteY: number = alignToPrev
+          ? lastNoteY!
+          : attach ? lastMessageArrowY! + NOTE_ATTACH_OFFSET : y;
         const drawn = drawNote(
-          stmt, y, laneCenters, headerW, laneIdx,
+          stmt, noteY, laneCenters, headerW, laneIdx,
           labels[i] ?? stmt.text, diagramWidth,
         );
+        // `/` directive: keep two side-by-side notes visually distinct by
+        // ensuring the new note's left edge sits at least NOTE_HGAP to the
+        // right of the previous note's right edge. Otherwise their polygons
+        // would touch (or overlap) and read as one merged rectangle.
+        let noteRight = drawn.x + drawn.width;
+        if (alignToPrev && lastNoteRight !== null) {
+          const minLeft = lastNoteRight + NOTE_HGAP;
+          if (drawn.x < minLeft) {
+            const dx = minLeft - drawn.x;
+            shiftShapesX(drawn.shapes, dx);
+            noteRight += dx;
+          }
+        }
         body.push(...drawn.shapes);
-        y += drawn.height + NOTE_GAP;
+        if (alignToPrev) {
+          // Both notes share the row — advance y past the taller of the two,
+          // so subsequent statements clear both. The previous note's bottom
+          // is already accounted for in `y`; only extend further if this note
+          // reaches lower.
+          const noteBottomY = noteY + drawn.height + NOTE_GAP;
+          if (noteBottomY > y) y = noteBottomY;
+          // Track the rightmost edge so a third side-by-side note (chained
+          // `/`s) clears both predecessors.
+          lastNoteRight = Math.max(lastNoteRight ?? noteRight, noteRight);
+        } else if (attach) {
+          // Keep the next stmt's y at max(current cursor, note bottom + small
+          // gap). The pre-existing y already includes MSG_GAP from the
+          // message; the note may still extend below that, so take the max.
+          const noteBottomY = noteY + drawn.height + NOTE_GAP / 2;
+          if (noteBottomY > y) y = noteBottomY;
+          lastNoteY = noteY;
+          lastNoteRight = noteRight;
+        } else {
+          y = noteY + drawn.height + NOTE_GAP;
+          lastNoteY = noteY;
+          lastNoteRight = noteRight;
+        }
+        // A note consumes the attach opportunity; chained notes after this
+        // one should flow normally below.
+        lastMessageArrowY = null;
         break;
       }
 
@@ -723,6 +1047,10 @@ function doLayoutSequence(ast: SequenceAst): Scene {
             ),
           );
           y += MSG_GAP + slopeDy;
+          // Boundary messages are visually a single arrow but they don't
+          // participate in the shorthand-note attach (the parser's
+          // sideNoteFallback can't reference a missing endpoint). Reset.
+          lastMessageArrowY = null;
           break;
         }
         const fromIdx = laneIdx.get(stmt.from);
@@ -776,6 +1104,10 @@ function doLayoutSequence(ast: SequenceAst): Scene {
           );
           body.push(...self.shapes);
           const msgY = y + (self.height - SELF_MSG_H / 2);
+          // Anchor any immediately-following shorthand note to the loop's
+          // mid-line. We use msgY (the visible arrow center) rather than the
+          // pre-draw y so attached notes align with the actual arrow.
+          lastMessageArrowY = msgY;
           if (pushActivation) {
             actStack[toIdx]!.push({
               yStart: y - 2,
@@ -785,7 +1117,6 @@ function doLayoutSequence(ast: SequenceAst): Scene {
             callStack.push({ laneIdx: toIdx, fromIdx });
           }
           y += self.height + MSG_GAP;
-          void msgY;
         } else {
           const lineCount = label ? label.split('\n').length : 1;
           const labelHeadroom = lineCount > 1 ? (lineCount - 1) * MSG_LINE_H : 0;
@@ -805,6 +1136,9 @@ function doLayoutSequence(ast: SequenceAst): Scene {
               slopeDy > 0 ? y + slopeDy : undefined,
             ),
           );
+          // Record the arrow's body y so an immediately-following shorthand
+          // note can hug it instead of being pushed below MSG_GAP.
+          lastMessageArrowY = y;
           if (pushActivation) {
             actStack[toIdx]!.push({
               yStart: y - 2,
@@ -856,7 +1190,9 @@ function doLayoutSequence(ast: SequenceAst): Scene {
   // Lanes with `bornY` set (created mid-diagram) have their top header drawn
   // at the message's y instead of at the page top, and the lifeline starts
   // from there. Lanes with `diedY` set (destroyed mid-diagram) have their
-  // lifeline truncated at that y and skip the bottom header.
+  // lifeline truncated at that y; the bottom header is STILL drawn, mirroring
+  // PlantUML — a blank gap appears between the red X marker and the bottom
+  // header rather than the header being suppressed.
   const lifelines: Shape[] = [];
   const headers: Shape[] = [];
   for (const page of pages) {
@@ -892,7 +1228,10 @@ function doLayoutSequence(ast: SequenceAst): Scene {
         ? Math.max(page.topY, bornY[i]! - headerH)
         : page.topY;
       headers.push(...drawHeader(parts[i]!, laneCenters[i]!, headerW[i]!, topHeaderY, headerH));
-      if (diedY[i] === undefined) {
+      // Bottom header is drawn for declared participants regardless of
+      // mid-diagram destruction. The lifeline truncation above already
+      // produces the blank gap between the destroy y and this header.
+      if (!ast.hideFootbox) {
         headers.push(...drawHeader(parts[i]!, laneCenters[i]!, headerW[i]!, pageBottomLine, headerH));
       }
     }
@@ -946,7 +1285,8 @@ function doLayoutSequence(ast: SequenceAst): Scene {
       ]
     : [];
 
-  const bottomBlockY = lifelineBottom + headerH + PAGE_HEADER_GAP;
+  const bottomHeaderBandH = ast.hideFootbox ? 0 : headerH;
+  const bottomBlockY = lifelineBottom + bottomHeaderBandH + PAGE_HEADER_GAP;
   const pageFooterShapes: Shape[] = pageFooterLines.map((line, i) => ({
     type: 'text',
     x: SIDE_PAD,
@@ -957,13 +1297,13 @@ function doLayoutSequence(ast: SequenceAst): Scene {
     font: { family: FONT_FAMILY, size: PAGE_HEADER_FONT_SIZE, color: COLOR_PAGE_MARGIN },
   }));
 
-  const totalHeight = lifelineBottom + headerH + pageFooterH + BOTTOM_PAD;
+  const totalHeight = lifelineBottom + bottomHeaderBandH + pageFooterH + BOTTOM_PAD;
 
   // `box ... end box` rectangles. Built once at the end so we know the full
   // diagram's vertical extent (top of first page header → bottom of last
   // page header). Drawn BEFORE lifelines/acts/headers so they sit behind
   // every other shape (z-order is array order in the renderer).
-  const boxShapes = buildBoxShapes(parts, laneCenters, headerW, pages, headerH, lifelineBottom);
+  const boxShapes = buildBoxShapes(parts, laneCenters, headerW, pages, headerH, lifelineBottom, bottomHeaderBandH);
 
   // `skinparam handwritten true` — emit the upstream-PlantUML "use !option"
   // notice at the very top. Built last so we can size the box against the
@@ -1088,6 +1428,7 @@ function buildBoxShapes(
   pages: Array<{ topY: number; bottomY: number }>,
   headerH: number,
   lifelineBottom: number,
+  bottomHeaderBandH: number = headerH,
 ): Shape[] {
   if (parts.length === 0 || pages.length === 0) return [];
   // Group contiguous lanes with the same box id. A non-boxed lane breaks the
@@ -1112,7 +1453,7 @@ function buildBoxShapes(
   // title strip carved out above) down to just below the bottom header on
   // the last page.
   const top = pages[0]!.topY - BOX_TITLE_STRIP;
-  const bottom = lifelineBottom + headerH + BOX_PAD_Y;
+  const bottom = lifelineBottom + bottomHeaderBandH + BOX_PAD_Y;
 
   const shapes: Shape[] = [];
   for (const run of runs) {
@@ -1140,6 +1481,49 @@ function buildBoxShapes(
     }
   }
   return shapes;
+}
+
+/**
+ * Word-wraps a single note line so no resulting line's rendered width exceeds
+ * MAX_NOTE_W. Preserves whitespace between words; if a single word is wider
+ * than the cap it is kept on its own line (we don't break inside words).
+ */
+function wrapNoteLine(line: string): string[] {
+  if (measureText(line, FONT_SIZE).width <= MAX_NOTE_W) return [line];
+  // Split into alternating word/whitespace tokens so we can rejoin without
+  // mangling internal spacing.
+  const tokens = line.split(/(\s+)/);
+  const out: string[] = [];
+  let cur = '';
+  for (const tok of tokens) {
+    if (tok === '') continue;
+    const candidate = cur + tok;
+    if (cur === '') {
+      cur = tok;
+      continue;
+    }
+    if (measureText(candidate, FONT_SIZE).width > MAX_NOTE_W) {
+      out.push(cur.replace(/\s+$/, ''));
+      // Drop the leading whitespace token that would otherwise start the
+      // next line.
+      cur = /^\s+$/.test(tok) ? '' : tok;
+    } else {
+      cur = candidate;
+    }
+  }
+  if (cur !== '' && !/^\s+$/.test(cur)) out.push(cur);
+  return out.length > 0 ? out : [line];
+}
+
+/**
+ * Applies wrapNoteLine to each explicit line in `text`, returning the joined
+ * (possibly multi-line) result. The original line breaks are preserved.
+ */
+function wrapNoteText(text: string): string {
+  return text
+    .split('\n')
+    .flatMap((l) => wrapNoteLine(l))
+    .join('\n');
 }
 
 function precomputeMessageLabels(stmts: SequenceStatement[]): string[] {
@@ -1196,11 +1580,13 @@ function precomputeMessageLabels(stmts: SequenceStatement[]): string[] {
     } else if (s.type === 'note') {
       // Notes substitute `%autonumber%` with the most recently used number
       // (PlantUML本家 behavior). Leading whitespace from indented note lines
-      // is trimmed to match the canonical rendering.
+      // is trimmed to match the canonical rendering. Each resulting line is
+      // word-wrapped to MAX_NOTE_W so long bodies render as several lines
+      // instead of one extremely wide line.
       const lines = s.text.split('\n').map((line) =>
         resolveUnicodeEscapes(substituteAutoNumber(line.replace(/^\s+/, ''), lastAutoStr)),
       );
-      out[i] = lines.join('\n');
+      out[i] = wrapNoteText(lines.join('\n'));
     } else if (s.type === 'ref') {
       const lines = s.text.split('\n').map((line) =>
         resolveUnicodeEscapes(line.replace(/^\s+/, '')),
@@ -1299,12 +1685,14 @@ function computeLaneGaps(
   // LEFT of X to fit the note's width. `note right of X` for an inner lane
   // (X < laneCount-1) needs the gap to the RIGHT of X to fit. Without this,
   // long side notes overflow into neighbouring participants' area.
-  for (const s of stmts) {
+  for (let si = 0; si < stmts.length; si++) {
+    const s = stmts[si]!;
     if (s.type !== 'note') continue;
     if (s.position !== 'left' && s.position !== 'right') continue;
     const idx = laneIdx.get(s.targets[0]!);
     if (idx === undefined) continue;
-    const lines = s.text ? s.text.split('\n') : [];
+    const noteText = labels[si] ?? s.text;
+    const lines = noteText ? noteText.split('\n') : [];
     let maxLineW = 0;
     for (const line of lines) {
       const w = measureText(line, FONT_SIZE).width;
@@ -1541,6 +1929,23 @@ function drawDot(cx: number, cy: number, color: string): Shape {
   };
 }
 
+/**
+ * Shift every shape in-place horizontally by `dx`. Used to nudge a note placed
+ * by `drawNote` to the right when its natural x would overlap the previous
+ * side-by-side note (`/` directive). Handles every shape type that `drawNote`
+ * can emit: rect, polygon, polyline, text.
+ */
+function shiftShapesX(shapes: Shape[], dx: number): void {
+  if (dx === 0) return;
+  for (const s of shapes) {
+    if (s.type === 'rect' || s.type === 'text') {
+      s.x += dx;
+    } else if (s.type === 'polygon' || s.type === 'polyline') {
+      for (const pt of s.points) pt[0] += dx;
+    }
+  }
+}
+
 function drawNote(
   stmt: NoteStmt,
   y: number,
@@ -1549,13 +1954,15 @@ function drawNote(
   laneIdx: Map<string, number>,
   text: string,
   diagramWidth: number,
-): { shapes: Shape[]; height: number } {
+): { shapes: Shape[]; height: number; x: number; width: number } {
   const lines = text.split('\n');
   const allSpans = lines.map(parseLabelMarkup);
   let maxLineW = 0;
   for (const spans of allSpans) {
-    let lineW = 0;
-    for (const sp of spans) lineW += measureText(sp.text, FONT_SIZE).width;
+    // `measureSpansWidth` accounts for inline `<img:url>` placeholders so the
+    // note grows wide enough to contain the image (height growth is left for
+    // a follow-up — see the layout comment in `markup.ts`).
+    const lineW = measureSpansWidth(spans, FONT_SIZE);
     if (lineW > maxLineW) maxLineW = lineW;
   }
   const lineH = FONT_SIZE * 1.25;
@@ -1649,7 +2056,7 @@ function drawNote(
     shapes.push(...drawLabelSpans(spans, x + textXOffset, baseY, 'start', 'alphabetic'));
   }
 
-  return { shapes, height: noteH };
+  return { shapes, height: noteH, x, width: noteW };
 }
 
 /**
@@ -1767,10 +2174,30 @@ function drawGroup(
   laneCenters: number[],
   headerW: number[],
 ): Shape[] {
-  const xLeft = laneCenters[g.minLane]! - headerW[g.minLane]! / 2 - GROUP_SIDE_PAD;
-  const xRight = laneCenters[g.maxLane]! + headerW[g.maxLane]! / 2 + GROUP_SIDE_PAD;
+  let xLeft = laneCenters[g.minLane]! - headerW[g.minLane]! / 2 - GROUP_SIDE_PAD;
+  let xRight = laneCenters[g.maxLane]! + headerW[g.maxLane]! / 2 + GROUP_SIDE_PAD;
+  // Grow horizontally to contain inner content (notes attached to messages
+  // inside the group whose bbox reaches past the natural lane span).
+  if (g.leftX !== undefined) {
+    const need = g.leftX - GROUP_SIDE_PAD;
+    if (need < xLeft) xLeft = need;
+  }
+  if (g.rightX !== undefined) {
+    const need = g.rightX + GROUP_SIDE_PAD;
+    if (need > xRight) xRight = need;
+  }
   const w = xRight - xLeft;
-  const tabLabel = g.kind + (g.label ? ` [${g.label}]` : '');
+  // Tab layout: the BOLD tab text is the keyword (e.g. `alt`, `loop`). For
+  // `group <label>` there's no fixed keyword — the user-supplied label takes
+  // the tab slot (fallback to `group` when no label was given). Any text
+  // beyond the tab keyword renders as a separate `[secondary]` annotation to
+  // the right of the tab. For `alt foo`/`loop 1000 times` etc. the secondary
+  // is the original label; for `group X [Y]` it's the bracketed `Y`.
+  const isGroupKind = g.kind === 'group';
+  const tabLabel = isGroupKind ? (g.label || 'group') : g.kind;
+  const secondaryLabel = isGroupKind
+    ? (g.label2 ?? '')
+    : (g.label ?? '');
   const tabTextW = measureText(tabLabel, FONT_GROUP).width;
   const tabW = tabTextW + 14;
   const tabH = GROUP_HEADER_HEIGHT;
@@ -1834,6 +2261,21 @@ function drawGroup(
     },
   );
 
+  // Secondary `[label]` annotation to the right of the tab. Drawn as a
+  // standalone (non-bold) text shape so callers and golden snapshots can
+  // distinguish it from the bold tab keyword.
+  if (secondaryLabel) {
+    shapes.push({
+      type: 'text',
+      x: xLeft + tabW + 8,
+      y: g.yStart + tabH / 2,
+      text: `[${secondaryLabel}]`,
+      anchor: 'start',
+      baseline: 'middle',
+      font: { family: FONT_FAMILY, size: FONT_GROUP, color: '#000' },
+    });
+  }
+
   for (const d of g.dividers) {
     shapes.push({
       type: 'line',
@@ -1862,36 +2304,13 @@ function drawGroup(
 function drawDivider(stmt: DividerStmt, y: number, totalWidth: number): Shape[] {
   const cx = totalWidth / 2;
   if (stmt.kind === 'delay') {
-    // `... long delay ...` — centered italic text with a dotted line through it,
-    // no boxed pill.
-    const spans = parseLabelMarkup(stmt.label);
-    const lineY = y + DIVIDER_HEIGHT / 2;
-    // `<style> delay { LineStyle ... }` override. `'none'` means explicit
-    // solid (no dasharray); other strings replace the default; `undefined`
-    // keeps the default `'2,3'`.
-    const delayDash = getStyles().delayDasharray;
-    const lineStyle: { stroke: string; strokeWidth: number; strokeDasharray?: string } = {
-      stroke: COLOR_GROUP_STROKE, strokeWidth: 1,
-    };
-    if (delayDash === undefined) lineStyle.strokeDasharray = '2,3';
-    else if (delayDash !== 'none') lineStyle.strokeDasharray = delayDash;
-    const shapes: Shape[] = [
-      {
-        type: 'line',
-        x1: SIDE_PAD, y1: lineY,
-        x2: totalWidth - SIDE_PAD, y2: lineY,
-        style: lineStyle,
-      },
-    ];
+    // PlantUML reference: `...` produces ONLY a vertical gap in the timeline
+    // (no horizontal line crossing the diagram). `... text ...` shows the
+    // text centered in that gap; the lifelines continue dashed through it.
+    const shapes: Shape[] = [];
     if (stmt.label) {
-      // Erase the dashed line under the label with a small white rect.
-      const lblW = measureText(stmt.label, FONT_SIZE).width + 12;
-      shapes.push({
-        type: 'rect',
-        x: cx - lblW / 2, y: lineY - FONT_SIZE / 2 - 2,
-        w: lblW, h: FONT_SIZE + 4,
-        style: { fill: '#fff', stroke: 'none', strokeWidth: 0 },
-      });
+      const spans = parseLabelMarkup(stmt.label);
+      const lineY = y + DIVIDER_HEIGHT / 2;
       shapes.push(
         ...drawLabelSpans(spans, cx, lineY, 'middle', 'middle', FONT_SIZE),
       );
@@ -1899,13 +2318,25 @@ function drawDivider(stmt: DividerStmt, y: number, totalWidth: number): Shape[] 
     return shapes;
   }
   const labelW = measureText(stmt.label, FONT_SIZE).width + 24;
+  // `==title==` renders with TWO parallel horizontal lines (the doubled `==`
+  // is drawn as a double rule, matching PlantUML's reference output).
+  const midY = y + DIVIDER_HEIGHT / 2;
+  const lineGap = 2; // px above/below midY → ~4 px between the two rules.
   return [
     {
       type: 'line',
       x1: SIDE_PAD,
-      y1: y + DIVIDER_HEIGHT / 2,
+      y1: midY - lineGap,
       x2: totalWidth - SIDE_PAD,
-      y2: y + DIVIDER_HEIGHT / 2,
+      y2: midY - lineGap,
+      style: { stroke: COLOR_GROUP_STROKE, strokeWidth: 1 },
+    },
+    {
+      type: 'line',
+      x1: SIDE_PAD,
+      y1: midY + lineGap,
+      x2: totalWidth - SIDE_PAD,
+      y2: midY + lineGap,
       style: { stroke: COLOR_GROUP_STROKE, strokeWidth: 1 },
     },
     {

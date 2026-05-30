@@ -99,3 +99,40 @@ describe('regex \\Q...\\E literal sequence', () => {
     expect(rects.length).toBe(1);
   });
 });
+
+const REGEX_UNICODE_CATEGORIES = `@startregex
+title unicodeCategories
+letter \\p{L}\\p{Letter} lower \\p{Ll}\\p{Lowercase_letter}
+@endregex`;
+
+describe('regex \\p{} unicode property escapes', () => {
+  it('preserves \\p{} atoms (including underscore in property names) in the AST pattern', () => {
+    const ast = parseToAst(REGEX_UNICODE_CATEGORIES);
+    expect(ast.kind).toBe('regex');
+    if (ast.kind === 'regex') {
+      expect(ast.title).toBe('unicodeCategories');
+      expect(ast.pattern).toContain('\\p{L}');
+      expect(ast.pattern).toContain('\\p{Letter}');
+      expect(ast.pattern).toContain('\\p{Ll}');
+      expect(ast.pattern).toContain('\\p{Lowercase_letter}');
+    }
+  });
+
+  it('renders each \\p{} atom as a special node, with surrounding literals and whitespace intact', () => {
+    const scene = compile(REGEX_UNICODE_CATEGORIES);
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((t) => (t as { text: string }).text);
+    // Title text present.
+    expect(texts).toContain('unicodeCategories');
+    // Each of the four \p{} atoms rendered (special nodes use "? <raw> ?" framing).
+    expect(texts).toContain('? \\p{L} ?');
+    expect(texts).toContain('? \\p{Letter} ?');
+    expect(texts).toContain('? \\p{Ll} ?');
+    // Underscore in property name must be preserved — regression for task #55.
+    expect(texts).toContain('? \\p{Lowercase_letter} ?');
+    // Interleaved literal runs (including whitespace) are kept distinct from the atoms.
+    expect(texts).toContain('"letter "');
+    expect(texts).toContain('" lower "');
+  });
+});

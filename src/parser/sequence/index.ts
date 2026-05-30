@@ -4,6 +4,7 @@ import type {
   AutoActivateStmt,
   AutoNumberStmt,
   DeactivateStmt,
+  DestroyStmt,
   DividerStmt,
   GroupElseStmt,
   GroupEndStmt,
@@ -35,6 +36,7 @@ import {
   NEWPAGE,
   DEACTIVATE,
   DELAY,
+  DESTROY,
   DIVIDER,
   FOOTER_BLOCK,
   FOOTER_END,
@@ -46,6 +48,7 @@ import {
   HEADER_END,
   HEADER_INLINE,
   HIDE,
+  IGNORE_NEWPAGE,
   LINE_COMMENT,
   MAINFRAME,
   MESSAGE,
@@ -57,6 +60,7 @@ import {
   NOTE_ACROSS_INLINE,
   NOTE_END,
   NOTE_OVER_BLOCK,
+  NOTE_OVER_BLOCK_FIRST_LINE,
   NOTE_OVER_INLINE,
   NOTE_SIDE_BLOCK,
   NOTE_SIDE_INLINE,
@@ -77,6 +81,8 @@ interface PendingNote {
   targets: string[];
   buffer: string[];
   color?: string;
+  shorthand?: boolean;
+  alignToPrev?: boolean;
 }
 
 interface PendingPartBlock {
@@ -137,6 +143,10 @@ export function parseSequence(source: string): SequenceAst {
   let pendingRef: PendingRef | null = null;
   let inBlockComment = false;
   let lastMessage: MessageStmt | null = null;
+  // `/` directive — a bare `/` line preceding a note marks the next note for
+  // y-alignment with the previously drawn note (side-by-side layout). The flag
+  // is consumed by the next NoteStmt produced.
+  let nextNoteAlignsToPrev = false;
   let headerBuf: string[] | null = null;
   let footerBuf: string[] | null = null;
   // Active `box ... end box` group. PlantUML rejects nested boxes; we mirror
@@ -222,6 +232,8 @@ export function parseSequence(source: string): SequenceAst {
           text: pn.buffer.join('\n'),
         };
         if (pn.color) noteStmt.color = pn.color;
+        if (pn.shorthand) noteStmt.shorthand = true;
+        if (pn.alignToPrev) noteStmt.alignToPrev = true;
         ast.statements.push(noteStmt);
         pendingNote = null;
       } else {
@@ -256,6 +268,16 @@ export function parseSequence(source: string): SequenceAst {
     if (hideMatch) {
       const rest = hideMatch[1]!.trim().toLowerCase();
       if (rest === 'unlinked') ast.hideUnlinked = true;
+      else if (rest === 'footbox') ast.hideFootbox = true;
+      continue;
+    }
+
+    // `ignore newpage` — diagram-level switch: when set, the layout drops every
+    // `newpage` statement instead of truncating at the first one. Recognised
+    // here (not inside parseStatement) because it's a global AST flag rather
+    // than a positional statement.
+    if (IGNORE_NEWPAGE.test(text)) {
+      ast.ignoreNewpage = true;
       continue;
     }
 
@@ -299,15 +321,39 @@ export function parseSequence(source: string): SequenceAst {
       continue;
     }
 
+    // Bare `/` directive: align the NEXT note's y to the most recently drawn
+    // note's y (PlantUML side-by-side notes). Set a transient flag that the
+    // next NoteStmt consumes; non-note statements between `/` and the note
+    // clear it.
+    if (/^\/\s*$/.test(text)) {
+      nextNoteAlignsToPrev = true;
+      continue;
+    }
+
     const stmt = parseStatement(
       text,
       addParticipant,
-      (note) => { pendingNote = note; },
+      (note) => {
+        if (nextNoteAlignsToPrev) {
+          note.alignToPrev = true;
+          nextNoteAlignsToPrev = false;
+        }
+        pendingNote = note;
+      },
       (block) => { pendingPartBlock = block; },
       (ref) => { pendingRef = ref; },
       lastMessage,
     );
     if (stmt) {
+      if (stmt.type === 'note' && nextNoteAlignsToPrev) {
+        stmt.alignToPrev = true;
+        nextNoteAlignsToPrev = false;
+      } else if (stmt.type !== 'note') {
+        // A non-note statement breaks the `/` chaining (the flag was set but
+        // the next statement isn't a note); discard it so it doesn't latch
+        // onto a later, unrelated note.
+        nextNoteAlignsToPrev = false;
+      }
       ast.statements.push(stmt);
       if (stmt.type === 'message') lastMessage = stmt;
     }
@@ -325,7 +371,7 @@ export function parseSequence(source: string): SequenceAst {
       for (const t of stmt.targets) {
         addParticipant({ id: t, label: t, shape: 'participant' });
       }
-    } else if (stmt.type === 'activate' || stmt.type === 'deactivate') {
+    } else if (stmt.type === 'activate' || stmt.type === 'deactivate' || stmt.type === 'destroy') {
       addParticipant({ id: stmt.target, label: stmt.target, shape: 'participant' });
     } else if (stmt.type === 'ref') {
       for (const t of stmt.targets) {
@@ -434,11 +480,17 @@ function parseStatement(
 
   if ((m = ACTIVATE.exec(text))) {
     const stmt: ActivateStmt = { type: 'activate', target: extractName(m[1], m[2]) };
+    if (m[3]) stmt.color = m[3];
     return stmt;
   }
 
   if ((m = DEACTIVATE.exec(text))) {
     const stmt: DeactivateStmt = { type: 'deactivate', target: extractName(m[1], m[2]) };
+    return stmt;
+  }
+
+  if ((m = DESTROY.exec(text))) {
+    const stmt: DestroyStmt = { type: 'destroy', target: extractName(m[1], m[2]) };
     return stmt;
   }
 
@@ -486,6 +538,7 @@ function parseStatement(
       text: unescapeLabel((m[6] ?? '').trim()),
     };
     if (colorRaw) stmt.color = normalizeColor(colorRaw);
+    if (!explicit) stmt.shorthand = true;
     return stmt;
   }
 
@@ -498,6 +551,7 @@ function parseStatement(
     const colorRaw = m[5];
     const pending: PendingNote = { position: pos, shape, targets: [target], buffer: [] };
     if (colorRaw) pending.color = normalizeColor(colorRaw);
+    if (!explicit) pending.shorthand = true;
     setPendingNote(pending);
     return null;
   }
@@ -531,6 +585,23 @@ function parseStatement(
       buffer: [],
     };
     if (colorRaw) pending.color = normalizeColor(colorRaw);
+    setPendingNote(pending);
+    return null;
+  }
+
+  // `rnote over X <text>` / `hnote over X <text>` — block opener where the
+  // remainder of the line is the FIRST line of body text (PlantUML quirk).
+  // Subsequent lines accumulate normally until `endrnote` / `endhnote`.
+  if ((m = NOTE_OVER_BLOCK_FIRST_LINE.exec(text))) {
+    const shape = m[1]!.toLowerCase() as NoteShape;
+    const target = extractName(m[2], m[3]);
+    const firstLine = (m[4] ?? '').trim();
+    const pending: PendingNote = {
+      position: 'over',
+      shape,
+      targets: [target],
+      buffer: firstLine ? [firstLine] : [],
+    };
     setPendingNote(pending);
     return null;
   }
@@ -575,11 +646,23 @@ function parseStatement(
   }
 
   if ((m = GROUP_START.exec(text))) {
+    const rawLabel = (m[4] ?? '').trim();
+    // Trailing `[secondary]` after the primary label splits into two fields
+    // so the layout can render the bracketed text as a separate annotation
+    // to the right of the tab keyword (PlantUML convention).
+    let label = rawLabel;
+    let label2: string | undefined;
+    const splitM = /^(.+?)\s*\[(.+?)\]\s*$/.exec(rawLabel);
+    if (splitM) {
+      label = splitM[1]!.trim();
+      label2 = splitM[2]!.trim();
+    }
     const stmt: GroupStartStmt = {
       type: 'groupStart',
       kind: m[1]!.toLowerCase() as GroupKind,
-      label: (m[4] ?? '').trim(),
+      label,
     };
+    if (label2) stmt.label2 = label2;
     if (m[2]) stmt.tabColor = resolveGroupColor(m[2]);
     if (m[3]) stmt.branchColor = resolveGroupColor(m[3]);
     return stmt;

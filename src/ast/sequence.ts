@@ -183,15 +183,46 @@ export interface NoteStmt {
   text: string;
   /** Optional `#color` background from `note … #color` directive. */
   color?: string;
+  /**
+   * True when the source used the shorthand `note left` / `note right` (no
+   * `of NAME`) form, so the target was resolved via the previous message. The
+   * layout uses this to (a) re-target to the outer side of the message in
+   * lane-order, and (b) place the note adjacent to that message's arrow.
+   */
+  shorthand?: boolean;
+  /**
+   * `/` directive — when present, the parser saw a bare `/` line immediately
+   * before this note. The layout aligns this note to the SAME y as the most
+   * recently drawn note (PlantUML "place side-by-side" behavior), so two
+   * notes can share a row.
+   */
+  alignToPrev?: boolean;
 }
 
 export interface ActivateStmt {
   type: 'activate';
   target: string;
+  /**
+   * Optional `#color` from `activate NAME #color` — fills the activation bar
+   * pushed by this directive. May be a hex (`#FFBBBB`) or a CSS / X11 named
+   * color (`#DarkSalmon`). When undefined the layout falls back to the
+   * default activation fill.
+   */
+  color?: string;
 }
 
 export interface DeactivateStmt {
   type: 'deactivate';
+  target: string;
+}
+
+/**
+ * `destroy NAME` — standalone directive (distinct from the `!!` message-arrow
+ * suffix). At layout time, draws a red X marker on NAME's lifeline at the
+ * current y and truncates the lifeline below that point.
+ */
+export interface DestroyStmt {
+  type: 'destroy';
   target: string;
 }
 
@@ -209,6 +240,11 @@ export interface GroupStartStmt {
   type: 'groupStart';
   kind: GroupKind;
   label: string;
+  /** Optional secondary label parsed from a trailing `[bracketed]` suffix on
+   *  the group-start line, e.g. `group My own label [My own label 2]`. The
+   *  primary `label` carries the text before the brackets; `label2` carries
+   *  the bracketed text (sans brackets). Rendered to the right of the tab. */
+  label2?: string;
   /** Optional fill color for the small folded-corner tab in the top-left.
    *  Parsed from `alt#Gold` or `alt #Gold` (the first `#color` token). */
   tabColor?: string;
@@ -293,6 +329,7 @@ export type SequenceStatement =
   | NoteStmt
   | ActivateStmt
   | DeactivateStmt
+  | DestroyStmt
   | GroupStartStmt
   | GroupElseStmt
   | GroupEndStmt
@@ -337,6 +374,12 @@ export interface SequenceAst {
    */
   hideUnlinked?: boolean;
   /**
+   * `hide footbox` — when true, the bottom-repeated participant/actor header
+   * row is suppressed; only the top header row is rendered. Lifelines run all
+   * the way to the bottom of the diagram body.
+   */
+  hideFootbox?: boolean;
+  /**
    * `mainframe <label>` — wraps the entire diagram body in a bordered
    * rectangle with a small folded-corner tab in the top-left containing the
    * label. The label is stored with raw inline markup (`**bold**`,
@@ -345,4 +388,10 @@ export interface SequenceAst {
    * occurrence wins.
    */
   mainframe?: string;
+  /**
+   * `ignore newpage` — when true, every `newpage` directive in the diagram is
+   * dropped at layout time so the result is a single continuous page. Opposes
+   * the default behaviour where the first `newpage` truncates the diagram.
+   */
+  ignoreNewpage?: boolean;
 }

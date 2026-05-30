@@ -3,6 +3,7 @@ import type {
   ClassDecl,
   ClassKind,
   ClassMember,
+  ClassPackage,
   ClassRelationship,
 } from '../../ast/class.js';
 import type { Scene, Shape } from '../../scene/types.js';
@@ -84,6 +85,18 @@ const VISIBILITY_GLYPH: Record<string, string> = {
   package: '~',
 };
 
+// Namespace package (`set separator`) frame styling. Each level of nesting
+// inflates the owning class's reserved size by `PKG_PAD_X` horizontally and
+// (`PKG_PAD_Y` + `PKG_LABEL_H`) vertically so the class box sits inside its
+// frame stack. The frame is drawn as a rounded rectangle with the package
+// name rendered in the top-left of its header band.
+const PKG_PAD_X = 12;
+const PKG_PAD_Y = 8;
+const PKG_LABEL_H = 16;
+const PKG_LABEL_FONT = 12;
+const PKG_FILL = '#fbfbfb';
+const PKG_STROKE = '#888';
+
 export function layoutClass(ast: ClassAst): Scene {
   if (ast.classes.length === 0) {
     return {
@@ -104,9 +117,26 @@ export function layoutClass(ast: ClassAst): Scene {
     };
   }
 
-  const sizes = new Map(
+  // Compute the package nesting depth (0 = no package, 1 = single parent
+  // package, etc.) for every class so size measurement can reserve room for
+  // each enclosing namespace frame's padding + header label band.
+  const packageById = new Map<string, ClassPackage>();
+  for (const p of ast.packages) packageById.set(p.id, p);
+  const depthByClass = new Map<string, number>();
+  for (const c of ast.classes) depthByClass.set(c.id, packageDepth(c, packageById));
+
+  const innerSizes = new Map(
     ast.classes.map((c) => [c.id, measureClass(c, isCompact(c, ast.hideEmptyMembers))]),
   );
+  // `sizes` is the inflated outer box (inner class box + nested package
+  // padding) used by the layout engine. `innerSizes` is reserved so the
+  // class box can be drawn at the inner offset later.
+  const sizes = new Map<string, BoxSize>();
+  for (const c of ast.classes) {
+    const inner = innerSizes.get(c.id)!;
+    const depth = depthByClass.get(c.id) ?? 0;
+    sizes.set(c.id, inflateForPackages(inner, depth));
+  }
   const titleHeight = ast.title ? TITLE_FONT + TITLE_GAP : 0;
 
   const selfLoops = ast.relationships.filter((r) => r.source === r.target);
@@ -156,7 +186,17 @@ export function layoutClass(ast: ClassAst): Scene {
     const pos = base.positions.get(c.id);
     if (!pos) continue;
     const compact = isCompact(c, ast.hideEmptyMembers);
-    shapes.push(...drawClassBox(c, pos.x, pos.y, sizes.get(c.id)!, compact));
+    const depth = depthByClass.get(c.id) ?? 0;
+    const outer = sizes.get(c.id)!;
+    const inner = innerSizes.get(c.id)!;
+    if (depth > 0) {
+      shapes.push(...drawPackageFrames(c, pos.x, pos.y, outer, depth, packageById));
+    }
+    // Offset the actual class box into the innermost package frame so it
+    // sits below the nested label bands and inside the padding.
+    const innerX = pos.x + depth * PKG_PAD_X;
+    const innerY = pos.y + depth * (PKG_PAD_Y + PKG_LABEL_H);
+    shapes.push(...drawClassBox(c, innerX, innerY, inner, compact));
   }
 
   void positions;
@@ -704,6 +744,100 @@ function drawSection(x: number, yTop: number, w: number, lines: string[]): Shape
       font: { family: FONT_FAMILY, size: FONT_MEMBER, color: '#000' },
     });
     y += ROW_HEIGHT;
+  }
+  return shapes;
+}
+
+/**
+ * Walk a class's package chain from leaf to root and count the levels. Used to
+ * inflate the class's reserved bounding box so each enclosing namespace frame
+ * gets `PKG_PAD_X`/`PKG_PAD_Y` padding and a `PKG_LABEL_H` label band.
+ */
+function packageDepth(c: ClassDecl, packageById: Map<string, ClassPackage>): number {
+  let depth = 0;
+  let id = c.packageId;
+  while (id !== undefined) {
+    depth++;
+    const pkg = packageById.get(id);
+    if (!pkg) break;
+    id = pkg.parentId;
+  }
+  return depth;
+}
+
+/**
+ * Grow a class's measured size to make room for `depth` nested namespace frames
+ * (each frame adds `2 * PKG_PAD_X` horizontally, plus `PKG_LABEL_H` + `PKG_PAD_Y`
+ * vertically — the label sits at the top, the bottom carries only padding).
+ */
+function inflateForPackages(inner: BoxSize, depth: number): BoxSize {
+  if (depth === 0) return inner;
+  return {
+    w: inner.w + depth * (PKG_PAD_X * 2),
+    h: inner.h + depth * (PKG_LABEL_H + PKG_PAD_Y * 2),
+  };
+}
+
+/**
+ * Draw the stack of namespace frames around a class. The outermost frame
+ * exactly matches the inflated outer box (`outer`); each subsequent frame
+ * shrinks by one padding ring (`PKG_PAD_X` on the sides, `PKG_LABEL_H +
+ * PKG_PAD_Y` at the top, `PKG_PAD_Y` at the bottom) and carries the next
+ * package's name in its header. Frames are emitted outer-first so the
+ * deepest frame and the class box layer on top in declaration order.
+ */
+function drawPackageFrames(
+  c: ClassDecl,
+  x: number,
+  y: number,
+  outer: BoxSize,
+  depth: number,
+  packageById: Map<string, ClassPackage>,
+): Shape[] {
+  if (depth === 0 || !c.packageId) return [];
+  // Resolve the chain from leaf to root, then reverse so the outermost
+  // package is drawn first (its frame is the largest).
+  const chain: ClassPackage[] = [];
+  let id: string | undefined = c.packageId;
+  while (id !== undefined) {
+    const pkg = packageById.get(id);
+    if (!pkg) break;
+    chain.push(pkg);
+    id = pkg.parentId;
+  }
+  chain.reverse();
+
+  const shapes: Shape[] = [];
+  let frameX = x;
+  let frameY = y;
+  let frameW = outer.w;
+  let frameH = outer.h;
+  for (const pkg of chain) {
+    shapes.push({
+      type: 'rect',
+      x: frameX,
+      y: frameY,
+      w: frameW,
+      h: frameH,
+      rx: 4,
+      ry: 4,
+      style: { fill: PKG_FILL, stroke: PKG_STROKE, strokeWidth: 1 },
+    });
+    shapes.push({
+      type: 'text',
+      x: frameX + 8,
+      y: frameY + PKG_LABEL_H - 4,
+      text: pkg.name,
+      anchor: 'start',
+      baseline: 'alphabetic',
+      font: { family: FONT_FAMILY, size: PKG_LABEL_FONT, weight: 'bold', color: '#333' },
+    });
+    // Shrink to the next inner frame: leave the label band + padding above
+    // and equal padding on the other three sides.
+    frameX += PKG_PAD_X;
+    frameY += PKG_LABEL_H + PKG_PAD_Y;
+    frameW -= PKG_PAD_X * 2;
+    frameH -= PKG_LABEL_H + PKG_PAD_Y * 2;
   }
   return shapes;
 }

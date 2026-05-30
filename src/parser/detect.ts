@@ -12,6 +12,7 @@ const WRAPPER_TO_KIND: Record<string, DiagramKind> = {
   wbs: 'wbs',
   ebnf: 'ebnf',
   regex: 'regex',
+  nwdiag: 'nwdiag',
 };
 
 const NON_DISCRIMINATING = new Set([
@@ -63,6 +64,7 @@ const UML_KEYWORD_TO_KIND: Record<string, DiagramKind> = {
   concise: 'timing',
   binary: 'timing',
   clock: 'timing',
+  analog: 'timing',
 };
 
 // Keywords that appear in multiple diagram types. Examples:
@@ -411,8 +413,14 @@ function hasClassArrow(tokens: Token[], startIdx: number, endIdx: number): boole
       // A pure-ellipsis line has only dots / identifiers / strings between
       // newlines — no anchor identifier sitting BOTH sides of the `..`.
       if (a === '.' && b === '.' && !lineIsEllipsisDelay(tokens, i)) return true;
-      if (CLASS_ONLY_MARKERS.has(a) && b === '-') return true;
-      if (a === '-' && CLASS_ONLY_MARKERS.has(b)) return true;
+      // Dash-adjacent class markers (`*-`, `+-`, `#-`, `}-`, `^-` and their
+      // reverses). Suppress on lines that also contain sequence-arrow chars
+      // (`<`, `>`, `[`, `]`) — otherwise sequence per-message activation
+      // suffixes like `A -> B --++ : msg` (which produce a `-`+`+` token
+      // adjacency for the deactivate-source + activate-target combo) and
+      // create suffixes like `A -> B ** : msg` would be misread as class.
+      if (CLASS_ONLY_MARKERS.has(a) && b === '-' && !lineHasSequenceArrowChars(tokens, i)) return true;
+      if (a === '-' && CLASS_ONLY_MARKERS.has(b) && !lineHasSequenceArrowChars(tokens, i)) return true;
     }
     // Identifier-as-marker cases: `o` (aggregation) and `x` (some PlantUML
     // variants). Detected as adjacency to a dash since the lexer treats them

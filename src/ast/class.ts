@@ -24,6 +24,14 @@ export interface ClassDecl {
   members: ClassMember[];
   enumConstants: EnumConstant[];
   /**
+   * Id of the {@link ClassPackage} that visually contains this class. Set when
+   * the class was declared with a namespaced name (e.g. `class X1::X2::foo`
+   * with `set separator ::`). Unset when the class lives at the diagram root.
+   * Resolved against {@link ClassAst.packages} by the layout step which then
+   * wraps the class in nested package frames.
+   */
+  packageId?: string;
+  /**
    * Optional visibility marker that appeared BEFORE the `class` keyword in the
    * declaration, e.g. `-class "private Class"` (private), `#class ...`
    * (protected), `~class ...` (package), `+class ...` (public). PlantUML uses
@@ -98,12 +106,40 @@ export interface ClassRelationship {
   direction?: RelationDirection;
 }
 
+/**
+ * A namespace package introduced by a namespaced class declaration (for example
+ * `class X1::X2::foo` with `set separator ::` yields packages `X1` and `X1::X2`,
+ * the latter parented by the former). Packages are emitted in declaration order
+ * with deeper packages following their parent. Layout walks the tree to render
+ * a nested rectangle frame around the contained classes.
+ */
+export interface ClassPackage {
+  id: string;
+  name: string;
+  parentId?: string;
+  classIds: string[];
+}
+
 export interface ClassAst {
   kind: 'class';
   title: string;
   classes: ClassDecl[];
   relationships: ClassRelationship[];
   hideEmptyMembers: boolean;
+  /**
+   * Namespace packages auto-created from namespaced class declarations. Empty
+   * when no class name contained the configured separator (or `set separator
+   * none` was active).
+   */
+  packages: ClassPackage[];
+  /**
+   * Active namespace separator token controlling how class names like
+   * `pkg.sub.Foo` (default `.`) or `pkg::sub::Foo` (after `set separator ::`)
+   * are split into a {package chain, class name} pair at parse time.
+   * `null` means `set separator none` was used — auto-packaging is disabled
+   * and namespaced names are kept verbatim.
+   */
+  separator?: string | null;
   /**
    * Diagram flow direction. `'TB'` (top-to-bottom, the default) stacks
    * sugiyama ranks vertically and orders nodes within a rank horizontally.

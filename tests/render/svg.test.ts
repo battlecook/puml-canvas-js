@@ -50,4 +50,22 @@ describe('SvgRenderer', () => {
     const bg = svg.querySelector('rect');
     expect(bg?.getAttribute('fill')).toBe('#eee');
   });
+
+  it('renders an image shape as <image> with href and xlink:href', () => {
+    const scene: Scene = {
+      width: 100, height: 100,
+      children: [
+        { type: 'image', x: 5, y: 7, w: 80, h: 40, href: 'https://example.com/pic.png' },
+      ],
+    };
+    const svg = new SvgRenderer().render(scene);
+    const img = svg.querySelector('image');
+    expect(img).toBeTruthy();
+    expect(img?.getAttribute('href')).toBe('https://example.com/pic.png');
+    expect(img?.getAttribute('xlink:href')).toBe('https://example.com/pic.png');
+    expect(img?.getAttribute('width')).toBe('80');
+    expect(img?.getAttribute('height')).toBe('40');
+    expect(img?.getAttribute('x')).toBe('5');
+    expect(img?.getAttribute('y')).toBe('7');
+  });
 });

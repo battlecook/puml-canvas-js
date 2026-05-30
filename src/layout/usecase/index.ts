@@ -30,6 +30,7 @@ import {
   handwrittenNoticeHeight,
   handwrittenNoticeWidth,
 } from '../common/handwritten.js';
+import { layoutKvTree } from '../json/index.js';
 
 const PAGE_PAD = 16;
 const TITLE_FONT = 16;
@@ -43,13 +44,14 @@ const UC_PAD_X = 16;
 const UC_PAD_Y = 8;
 const UC_MIN_W = 90;
 const UC_MIN_H = 38;
-// Multi-line / block labels grow taller and wider than a normal usecase. We
-// use a generous minimum width since multi-line descriptions tend to wrap on
-// long sentences, and a stadium / rounded-rect outline instead of an ellipse.
+// Multi-line / block labels grow taller and wider than a normal usecase. The
+// outline is still an ellipse (matching PlantUML), but its rx/ry are inflated
+// so the content's bounding box fits inside the inscribed rectangle of the
+// ellipse — that is, `rx = innerW * sqrt(2)/2 + pad`, `ry = innerH * sqrt(2)/2
+// + pad`. UC_BLOCK_MIN_W keeps short multi-line labels visually balanced.
 const UC_BLOCK_MIN_W = 200;
 const UC_BLOCK_PAD_X = 14;
 const UC_BLOCK_PAD_Y = 10;
-const UC_BLOCK_RX = 20;
 const UC_BLOCK_SEP_H = 10;
 const CONTAINER_PAD = 14;
 const CONTAINER_HEADER_H = 22;
@@ -76,6 +78,12 @@ const NOTE_PAD_X = 8;
 const NOTE_PAD_Y = 6;
 const NOTE_FOLD = 8;
 const NOTE_MIN_W = 60;
+// Maximum rendered text width (in px) for a single note line before it is
+// auto-wrapped on word boundaries by `wrapNoteText`. Matches the wrap behavior
+// PlantUML's reference renderer applies so long note bodies render as a
+// compact multi-line block instead of one runaway line. Lines split explicitly
+// with `\n` are preserved verbatim; only over-long single lines auto-wrap.
+const MAX_NOTE_W = 180;
 const COLOR_NOTE_FILL = '#FEFFDD';
 const COLOR_NOTE_STROKE = '#A0A088';
 
@@ -87,6 +95,13 @@ const EDGE_STYLE: EdgeStyle = {
 
 export function layoutUseCase(ast: UseCaseAst): Scene {
   if (ast.nodes.length === 0) {
+    // No actors/usecases declared — but `allowmixing` may have produced
+    // standalone `json NAME { ... }` blocks. Render those alone (stacked
+    // vertically with the standard page padding) so the diagram isn't
+    // silently empty.
+    if (ast.jsonNodes && ast.jsonNodes.length > 0) {
+      return layoutJsonOnlyScene(ast.jsonNodes);
+    }
     return emptyScene();
   }
 
@@ -176,6 +191,18 @@ export function layoutUseCase(ast: UseCaseAst): Scene {
     });
   }
 
+  // Push "external" nodes (referenced inside a container's relationships but
+  // declared OUTSIDE — e.g. pre-declared `actor customer` referenced via
+  // `customer -- (checkout)` inside `rectangle checkout {…}`) clear of the
+  // boundary box. The sugiyama layout would otherwise lay them out in the
+  // same column as the in-container members and slot them visually INSIDE
+  // the rectangle. We shift their position along the rank axis (X in LR,
+  // Y in TB) just past the container edge plus a small gap, then translate
+  // the WHOLE scene if eviction pushed anything past x=0 / y=0 so the diagram
+  // still anchors at PAGE_PAD on every side.
+  evictExternalNodesFromContainers(ast, base.positions, sizes, direction);
+  normalizeOrigin(base.positions, sizes, base.centers);
+
   for (const container of ast.containers) {
     const bbox = childBoundingBox(container.childIds, base.positions, sizes);
     if (!bbox) continue;
@@ -215,6 +242,16 @@ export function layoutUseCase(ast: UseCaseAst): Scene {
     totalHeight = Math.max(totalHeight, rectY + rectH + PAGE_PAD);
   }
 
+  // External nodes may now sit past the canvas's right/bottom edge after the
+  // shift; grow the scene to include them with the usual page padding.
+  for (const node of ast.nodes) {
+    const pos = base.positions.get(node.id);
+    const sz = sizes.get(node.id);
+    if (!pos || !sz) continue;
+    if (pos.x + sz.w + PAGE_PAD > totalWidth) totalWidth = pos.x + sz.w + PAGE_PAD;
+    if (pos.y + sz.h + PAGE_PAD > totalHeight) totalHeight = pos.y + sz.h + PAGE_PAD;
+  }
+
   if (base.drawable) {
     const offsets = computeLateralOffsets(base.drawable);
     for (const edge of base.drawable) {
@@ -229,6 +266,12 @@ export function layoutUseCase(ast: UseCaseAst): Scene {
             sourceMarker: ucRel.sourceMarker,
             targetMarker: ucRel.targetMarker,
             label: ucRel.label,
+            // Inline `#<styleBlock>` overrides — passed through verbatim so
+            // `drawLayeredEdge`'s `resolveLineStyle` can pick the dasharray
+            // and stroke width, and the label text picks up its colour.
+            ...(ucRel.lineColor !== undefined ? { lineColor: ucRel.lineColor } : {}),
+            ...(ucRel.lineStyle !== undefined ? { lineStyle: ucRel.lineStyle } : {}),
+            ...(ucRel.textColor !== undefined ? { textColor: ucRel.textColor } : {}),
           }
         : edge.rel;
       shapes.push(
@@ -294,7 +337,9 @@ export function layoutUseCase(ast: UseCaseAst): Scene {
     }
   }
 
-  const rawActorStyle = (ast.skin?.actorstyle ?? '').toLowerCase();
+  // Honour both the nested form (`skinparam usecase { actorStyle awesome }`,
+  // stored as `usecase.actorstyle`) and the top-level one-liner.
+  const rawActorStyle = (ast.skin?.['usecase.actorstyle'] ?? ast.skin?.actorstyle ?? '').toLowerCase();
   const actorStyle: ActorStyle =
     rawActorStyle === 'awesome'
       ? 'awesome'
@@ -305,6 +350,36 @@ export function layoutUseCase(ast: UseCaseAst): Scene {
     const pos = base.positions.get(node.id);
     if (!pos) continue;
     shapes.push(...drawNode(node, pos, sizes.get(node.id)!, actorStyle, ast, skin));
+  }
+
+  // Embedded `json NAME { ... }` blocks introduced by `allowmixing`. Each
+  // block renders as a standalone key/value tree (the same primitive used
+  // by the dedicated `@startjson` diagram) and is translated into a fresh
+  // strip below the existing content. We rely on the shared `layoutKvTree`
+  // helper for the table geometry rather than duplicating row-measurement
+  // here.
+  const JSON_BLOCK_GAP = 24;
+  if (ast.jsonNodes && ast.jsonNodes.length > 0) {
+    let jsonCursorY = totalHeight - PAGE_PAD + JSON_BLOCK_GAP;
+    for (const jn of ast.jsonNodes) {
+      const jsonScene = layoutKvTree({
+        title: '',
+        data: jn.data,
+        highlights: [],
+        parseError: jn.parseError ?? '',
+        errorLabel: 'JSON parse error',
+      });
+      shapes.push({
+        type: 'group',
+        transform: `translate(${PAGE_PAD},${jsonCursorY})`,
+        children: jsonScene.children,
+      });
+      const blockBottom = jsonCursorY + jsonScene.height;
+      const blockRight = PAGE_PAD + jsonScene.width;
+      if (blockRight + PAGE_PAD > totalWidth) totalWidth = blockRight + PAGE_PAD;
+      if (blockBottom + PAGE_PAD > totalHeight) totalHeight = blockBottom + PAGE_PAD;
+      jsonCursorY = blockBottom + JSON_BLOCK_GAP;
+    }
   }
 
   // `skinparam handwritten true` — yellow notice rectangle at the top-left.
@@ -345,6 +420,120 @@ function childBoundingBox(
     if (pos.y + sz.h > maxY) maxY = pos.y + sz.h;
   }
   return found ? { minX, minY, maxX, maxY } : null;
+}
+
+/**
+ * If any node sits past the left/top edge of the canvas after `eviction`,
+ * translate the WHOLE scene (positions + edge waypoint centers) so the
+ * leftmost / topmost node lands at PAGE_PAD. This keeps the diagram inside
+ * the SVG viewBox without distorting the relative geometry the layered
+ * layout produced.
+ *
+ * Safe no-op when nothing crosses the boundary.
+ */
+function normalizeOrigin(
+  positions: Map<string, Position>,
+  sizes: Map<string, BoxSize>,
+  centers: Map<string, NodeCenter> | undefined,
+): void {
+  let minX = Infinity;
+  let minY = Infinity;
+  for (const [id, pos] of positions) {
+    const sz = sizes.get(id);
+    if (!sz) continue;
+    if (pos.x < minX) minX = pos.x;
+    if (pos.y < minY) minY = pos.y;
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;
+  const dx = minX < PAGE_PAD ? PAGE_PAD - minX : 0;
+  const dy = minY < PAGE_PAD ? PAGE_PAD - minY : 0;
+  if (dx === 0 && dy === 0) return;
+  for (const [id, pos] of positions) {
+    positions.set(id, { x: pos.x + dx, y: pos.y + dy });
+  }
+  if (centers) {
+    for (const [id, c] of centers) {
+      centers.set(id, { cx: c.cx + dx, cy: c.cy + dy });
+    }
+  }
+}
+
+/**
+ * Slide nodes that participate in a container's relationships but are NOT
+ * members of any container clear of the boundary box.
+ *
+ * The sugiyama layered layout treats actors and use cases uniformly and packs
+ * them into adjacent columns/rows, so a pre-declared external (e.g. `actor
+ * customer` referenced inside `rectangle checkout { customer -- (checkout) }`)
+ * lands inside the rectangle's bounding box even though it isn't a member.
+ *
+ * For each container we compute the current member bbox; every external node
+ * connected to a member is shifted past the container edge by `EVICTION_GAP`,
+ * choosing the side (left/right in LR, top/bottom in TB) by which half of the
+ * container the external currently sits in. We translate position only —
+ * sizes and edge waypoint centers are unchanged, so edges still terminate
+ * cleanly on the moved node's rect via `drawLayeredEdge`'s end-clipping.
+ *
+ * No-ops when there are no containers, no externals, or when the external is
+ * already clear of the container's bbox along the rank axis.
+ */
+function evictExternalNodesFromContainers(
+  ast: UseCaseAst,
+  positions: Map<string, Position>,
+  sizes: Map<string, BoxSize>,
+  direction: 'TB' | 'LR',
+): void {
+  if (ast.containers.length === 0) return;
+  const memberOfAny = new Set<string>();
+  for (const c of ast.containers) {
+    for (const id of c.childIds) memberOfAny.add(id);
+  }
+  const EVICTION_GAP = HORIZONTAL_GAP;
+
+  for (const container of ast.containers) {
+    const memberSet = new Set(container.childIds);
+    if (memberSet.size === 0) continue;
+    const bbox = childBoundingBox(container.childIds, positions, sizes);
+    if (!bbox) continue;
+    // Collect externals connected to at least one member of this container.
+    const externals = new Set<string>();
+    for (const rel of ast.relationships) {
+      const sIn = memberSet.has(rel.source);
+      const tIn = memberSet.has(rel.target);
+      if (sIn && !tIn && !memberOfAny.has(rel.target)) externals.add(rel.target);
+      if (tIn && !sIn && !memberOfAny.has(rel.source)) externals.add(rel.source);
+    }
+    if (externals.size === 0) continue;
+
+    const cCenterX = (bbox.minX + bbox.maxX) / 2;
+    const cCenterY = (bbox.minY + bbox.maxY) / 2;
+
+    for (const id of externals) {
+      const pos = positions.get(id);
+      const sz = sizes.get(id);
+      if (!pos || !sz) continue;
+      const cx = pos.x + sz.w / 2;
+      const cy = pos.y + sz.h / 2;
+      if (direction === 'LR') {
+        // Already clear of the container along the X axis? Leave it alone.
+        const overlapsX = pos.x + sz.w > bbox.minX && pos.x < bbox.maxX;
+        if (!overlapsX) continue;
+        if (cx <= cCenterX) {
+          positions.set(id, { x: bbox.minX - EVICTION_GAP - sz.w, y: pos.y });
+        } else {
+          positions.set(id, { x: bbox.maxX + EVICTION_GAP, y: pos.y });
+        }
+      } else {
+        const overlapsY = pos.y + sz.h > bbox.minY && pos.y < bbox.maxY;
+        if (!overlapsY) continue;
+        if (cy <= cCenterY) {
+          positions.set(id, { x: pos.x, y: bbox.minY - EVICTION_GAP - sz.h });
+        } else {
+          positions.set(id, { x: pos.x, y: bbox.maxY + EVICTION_GAP });
+        }
+      }
+    }
+  }
 }
 
 interface BaseResult {
@@ -678,11 +867,21 @@ function measureNode(node: UCNode): BoxSize {
     const labelW = measureText(node.name, FONT_LABEL).width;
     const sw = stereoWidth(node);
     const w = Math.max(ACTOR_BOX_W, labelW + 8, sw + 8);
-    const h = ACTOR_BOX_H + (node.stereotype ? STEREO_LINE_H : 0);
+    // Labels with embedded `\n` render as stacked rows BELOW the figure, so
+    // grow the actor's reserved box by one line-height per extra row to
+    // keep the surrounding layout from clipping the lower rows.
+    const lineCount = node.name.split('\n').length;
+    const extraLabelH = (lineCount - 1) * Math.ceil(FONT_LABEL * 1.25);
+    const h = ACTOR_BOX_H + (node.stereotype ? STEREO_LINE_H : 0) + extraLabelH;
     return { w, h };
   }
   if (node.kind === 'note') {
-    const lines = (node.text ?? node.name).split('\n');
+    // Auto-wrap each explicit line so over-long single-line bodies render as
+    // a compact multi-line block (matches PlantUML). The wrap is keyed to
+    // MAX_NOTE_W so the measured width here matches what `drawUsecaseNote`
+    // will later lay out.
+    const wrapped = wrapNoteText(node.text ?? node.name);
+    const lines = wrapped.split('\n');
     let maxLineW = 0;
     let totalH = 0;
     const lineH = FONT_LABEL * 1.25;
@@ -712,14 +911,23 @@ function measureNode(node: UCNode): BoxSize {
   };
 }
 
-function measureBlocks(blocks: LabelBlock[]): BoxSize {
+/**
+ * Compute the bounding-box dimensions of the rendered block content (text rows
+ * and separators stacked vertically). Pure content size — no padding.
+ */
+function contentBlockSize(blocks: LabelBlock[]): BoxSize {
   let maxLineW = 0;
   let totalH = 0;
   for (const b of blocks) {
     if (b.kind === 'text') {
-      const m = measureText(b.text, FONT_LABEL);
-      if (m.width > maxLineW) maxLineW = m.width;
-      totalH += m.height;
+      // Per-line measurement so the widest individual line wins, not the
+      // joined paragraph width.
+      const lines = b.text.split('\n');
+      for (const ln of lines) {
+        const m = measureText(ln, FONT_LABEL);
+        if (m.width > maxLineW) maxLineW = m.width;
+        totalH += m.height;
+      }
     } else if (b.kind === 'sep-titled') {
       const m = measureText(b.text, FONT_LABEL);
       if (m.width > maxLineW) maxLineW = m.width;
@@ -728,9 +936,24 @@ function measureBlocks(blocks: LabelBlock[]): BoxSize {
       totalH += UC_BLOCK_SEP_H;
     }
   }
+  return { w: maxLineW, h: totalH };
+}
+
+/**
+ * Size the ellipse that hosts a multi-block usecase label. The content
+ * bounding box (`innerW × innerH`) must fit inside the ellipse's inscribed
+ * rectangle, which requires `rx = innerW * sqrt(2)/2` and `ry = innerH *
+ * sqrt(2)/2`. We add `UC_BLOCK_PAD_*` so the text isn't flush with the curve
+ * and clamp to `UC_BLOCK_MIN_W` for very short labels.
+ */
+function measureBlocks(blocks: LabelBlock[]): BoxSize {
+  const inner = contentBlockSize(blocks);
+  const SQRT2 = Math.SQRT2;
+  const rawW = inner.w * SQRT2 + UC_BLOCK_PAD_X * 2;
+  const rawH = inner.h * SQRT2 + UC_BLOCK_PAD_Y * 2;
   return {
-    w: Math.max(UC_BLOCK_MIN_W, maxLineW + UC_BLOCK_PAD_X * 2),
-    h: totalH + UC_BLOCK_PAD_Y * 2,
+    w: Math.max(UC_BLOCK_MIN_W, rawW),
+    h: rawH,
   };
 }
 
@@ -757,7 +980,11 @@ function resolveUsecaseTokens(
   skin: UCSkin,
 ): NodeStyleTokens {
   const tokens: NodeStyleTokens = {};
-  const fill = lookupStereotypeColor(ast, 'backgroundcolor', node.stereotype) ?? skin.backgroundColor;
+  // Ellipse fill comes from the `skinparam usecase { BackgroundColor X }`
+  // nested key (stored as `usecase.backgroundcolor`, or
+  // `usecase.backgroundcolor<<stereo>>` for scoped overrides). We do NOT
+  // fall back to `skin.backgroundColor` — that's the page canvas.
+  const fill = lookupStereotypeColor(ast, 'backgroundcolor', node.stereotype) ?? skin.usecaseBackgroundColor;
   if (fill) tokens.fill = fill;
   const stroke = lookupStereotypeColor(ast, 'bordercolor', node.stereotype) ?? skin.borderColor;
   if (stroke) tokens.stroke = stroke;
@@ -815,7 +1042,9 @@ function drawNode(
   const tokens = resolveUsecaseTokens(node, ast, skin);
   if (node.labelBlocks && node.labelBlocks.length > 0) {
     const shapes = drawUsecaseBlocks(node.labelBlocks, pos, sz);
-    if (node.business) shapes.push(drawBusinessMarkerRect(pos, sz, tokens));
+    // Multi-block usecases now draw an ellipse outline, so the business chord
+    // uses the same ellipse-aware geometry as the single-line variant.
+    if (node.business) shapes.splice(1, 0, drawBusinessMarkerEllipse(pos, sz, tokens));
     return shapes;
   }
   const shapes = drawUsecase(node.name, pos, sz, node.stereotype, tokens);
@@ -856,34 +1085,19 @@ function drawBusinessMarkerEllipse(pos: Position, sz: BoxSize, tokens: NodeStyle
 }
 
 /**
- * Business marker for the multi-block (stadium rect) usecase variant. We
- * draw a near-left vertical line that spans the rect's inner height. The
- * x position mirrors the ellipse case (60% of half-width inset from center).
- */
-function drawBusinessMarkerRect(pos: Position, sz: BoxSize, tokens: NodeStyleTokens): Shape {
-  const x = pos.x + sz.w * 0.2;
-  return {
-    type: 'line',
-    x1: x,
-    y1: pos.y + 4,
-    x2: x,
-    y2: pos.y + sz.h - 4,
-    style: { stroke: tokens.stroke ?? COLOR_LINE, strokeWidth: 1 },
-  };
-}
-
-/**
- * Business-actor marker — a short diagonal slash drawn at the bottom-right
- * of the stick figure (or torso, for the awesome silhouette) to mirror
- * PlantUML's `actor/` / `:Foo:/` rendering. The slash uses the same stroke
- * color as the rest of the actor and lives entirely within the actor's
- * reserved box so it doesn't perturb the surrounding layout.
+ * Business-actor marker — a diagonal slash drawn THROUGH the actor's head
+ * circle, from the top-left of the head to the bottom-right (passing through
+ * the head's center). This mirrors PlantUML's reference renderer for
+ * `actor/` / `:Foo:/`, where the slash crosses the head — not the torso.
  *
- * For the stickman/hollow styles, the figure spans roughly y ∈ [figureTop,
- * figureTop+44]. We anchor the slash near the right foot tip at
- * (cx + 9, figureTop + 44) and extend down-right by ~10px. For the awesome
- * silhouette the torso bottom-right corner sits at (cx + 13, torsoY + 22);
- * we anchor there instead.
+ * The endpoints sit at ±0.7r from the head center on both axes, which is
+ * exactly at the perimeter of the circle (`0.7 ≈ sqrt(2)/2`), so the slash
+ * looks like a diameter drawn at 45°. The line is rendered after the head so
+ * it remains visible on top of the head's fill.
+ *
+ * Head geometry per actor style is taken from the same constants as the
+ * corresponding draw function (`drawActor`, `drawActorHollow`,
+ * `drawActorAwesome`) so any future tweak to the figure stays in sync.
  */
 function drawBusinessMarkerActor(
   pos: Position,
@@ -892,31 +1106,35 @@ function drawBusinessMarkerActor(
   tokens: NodeStyleTokens,
 ): Shape {
   const cx = pos.x + sz.w / 2;
-  let x1: number;
-  let y1: number;
+  let headCy: number;
+  let headR: number;
   if (actorStyle === 'awesome') {
-    // figureTop = pos.y + 2; head bottom is at figureTop + 2*headR;
-    // torsoY = headCy + headR - 2 = figureTop + 3*headR - 2.
+    // Matches drawActorAwesome: figureTop = pos.y + 2; headR = 10.
     const figureTop = pos.y + 2;
-    const headR = 10;
-    const torsoH = 22;
-    const torsoY = figureTop + 3 * headR - 2;
-    x1 = cx + 13;
-    y1 = torsoY + torsoH - 4;
+    headR = 10;
+    headCy = figureTop + headR;
+  } else if (actorStyle === 'hollow') {
+    // Matches drawActorHollow: figureTop = pos.y + 2; headR = 9.
+    const figureTop = pos.y + 2;
+    headR = 9;
+    headCy = figureTop + headR;
   } else {
-    // Stickman/hollow share the same overall foot position at figureTop + 44.
+    // Matches drawActor (stickman): figureTop = pos.y + 4; head at
+    // (cx, figureTop + 6) with r = 6.
     const figureTop = pos.y + 4;
-    x1 = cx + 9;
-    y1 = figureTop + 44;
+    headR = 6;
+    headCy = figureTop + 6;
   }
-  // Short diagonal slash extending down-right by ~10px.
-  const len = 10;
+  // Endpoints at ±0.7r from the head center, i.e. on the head perimeter at
+  // 45° (sqrt(2)/2 ≈ 0.707). Result is a diameter-length slash crossing the
+  // head's center from upper-left to lower-right.
+  const off = headR * 0.7;
   return {
     type: 'line',
-    x1,
-    y1,
-    x2: x1 + len,
-    y2: y1 + len,
+    x1: cx - off,
+    y1: headCy - off,
+    x2: cx + off,
+    y2: headCy + off,
     style: { stroke: tokens.stroke ?? COLOR_LINE, strokeWidth: 1 },
   };
 }
@@ -941,6 +1159,50 @@ function makeStereotypeText(stereotype: string, cx: number, topY: number): Shape
       color: STEREO_COLOR,
     },
   };
+}
+
+/**
+ * Word-wraps a single note line so no resulting line's rendered width exceeds
+ * MAX_NOTE_W. Preserves whitespace between words; if a single word is wider
+ * than the cap it is kept on its own line (we don't break inside words).
+ */
+function wrapNoteLine(line: string): string[] {
+  if (measureText(line, FONT_LABEL).width <= MAX_NOTE_W) return [line];
+  // Split into alternating word/whitespace tokens so we can rejoin without
+  // mangling internal spacing.
+  const tokens = line.split(/(\s+)/);
+  const out: string[] = [];
+  let cur = '';
+  for (const tok of tokens) {
+    if (tok === '') continue;
+    if (cur === '') {
+      cur = tok;
+      continue;
+    }
+    const candidate = cur + tok;
+    if (measureText(candidate, FONT_LABEL).width > MAX_NOTE_W) {
+      out.push(cur.replace(/\s+$/, ''));
+      // Drop the leading whitespace token that would otherwise start the
+      // next line.
+      cur = /^\s+$/.test(tok) ? '' : tok;
+    } else {
+      cur = candidate;
+    }
+  }
+  if (cur !== '' && !/^\s+$/.test(cur)) out.push(cur);
+  return out.length > 0 ? out : [line];
+}
+
+/**
+ * Applies `wrapNoteLine` to each explicit line in `text`, returning the joined
+ * (possibly multi-line) result. Original `\n` boundaries are preserved — only
+ * single long lines auto-wrap.
+ */
+function wrapNoteText(text: string): string {
+  return text
+    .split('\n')
+    .flatMap((l) => wrapNoteLine(l))
+    .join('\n');
 }
 
 /**
@@ -976,7 +1238,10 @@ function drawUsecaseNote(text: string, pos: Position, sz: BoxSize): Shape[] {
     ],
     style: foldStyle,
   });
-  const lines = text.split('\n');
+  // Word-wrap each explicit line to MAX_NOTE_W; the same wrap is applied in
+  // `measureNode` so the box height computed there matches the row count we
+  // emit here.
+  const lines = wrapNoteText(text).split('\n');
   const lineH = FONT_LABEL * 1.25;
   for (let i = 0; i < lines.length; i++) {
     shapes.push({
@@ -992,6 +1257,38 @@ function drawUsecaseNote(text: string, pos: Position, sz: BoxSize): Shape[] {
   return shapes;
 }
 
+/**
+ * Render a (possibly multi-line) actor label as a stack of `text` shapes
+ * bottom-aligned to `pos.y + sz.h - 4`. Each `\n` in `name` becomes its own
+ * row; rows are stacked upward from the baseline so the lowest line stays at
+ * the original anchor and earlier lines climb above it.
+ */
+function actorLabelShapes(
+  name: string,
+  cx: number,
+  bottomY: number,
+  fontFam: string,
+): Shape[] {
+  const lines = name.split('\n');
+  const lineH = Math.ceil(FONT_LABEL * 1.25);
+  const out: Shape[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    // Bottom-most line sits at `bottomY`; earlier lines climb upward by
+    // `lineH` so the stack stays anchored to the actor's original label slot.
+    const y = bottomY - (lines.length - 1 - i) * lineH;
+    out.push({
+      type: 'text',
+      x: cx,
+      y,
+      text: lines[i]!,
+      anchor: 'middle',
+      baseline: 'alphabetic',
+      font: { family: fontFam, size: FONT_LABEL, color: '#000' },
+    });
+  }
+  return out;
+}
+
 function drawActor(name: string, pos: Position, sz: BoxSize, tokens: NodeStyleTokens = {}): Shape[] {
   const cx = pos.x + sz.w / 2;
   const figureTop = pos.y + 4;
@@ -1005,15 +1302,7 @@ function drawActor(name: string, pos: Position, sz: BoxSize, tokens: NodeStyleTo
     { type: 'line', x1: cx - 12, y1: figureTop + 20, x2: cx + 12, y2: figureTop + 20, style: stroke },
     { type: 'line', x1: cx, y1: figureTop + 32, x2: cx - 9, y2: figureTop + 44, style: stroke },
     { type: 'line', x1: cx, y1: figureTop + 32, x2: cx + 9, y2: figureTop + 44, style: stroke },
-    {
-      type: 'text',
-      x: cx,
-      y: pos.y + sz.h - 4,
-      text: name,
-      anchor: 'middle',
-      baseline: 'alphabetic',
-      font: { family: fontFam, size: FONT_LABEL, color: '#000' },
-    },
+    ...actorLabelShapes(name, cx, pos.y + sz.h - 4, fontFam),
   ];
 }
 
@@ -1052,15 +1341,7 @@ function drawActorAwesome(name: string, pos: Position, sz: BoxSize, tokens: Node
       ry: torsoW / 2,
       style: fillStroke,
     },
-    {
-      type: 'text',
-      x: cx,
-      y: pos.y + sz.h - 4,
-      text: name,
-      anchor: 'middle',
-      baseline: 'alphabetic',
-      font: { family: fontFam, size: FONT_LABEL, color: '#000' },
-    },
+    ...actorLabelShapes(name, cx, pos.y + sz.h - 4, fontFam),
   ];
 }
 
@@ -1113,15 +1394,7 @@ function drawActorHollow(name: string, pos: Position, sz: BoxSize, tokens: NodeS
       y2: bodyBottom + 12,
       style: stroke,
     },
-    {
-      type: 'text',
-      x: cx,
-      y: pos.y + sz.h - 4,
-      text: name,
-      anchor: 'middle',
-      baseline: 'alphabetic',
-      font: { family: fontFam, size: FONT_LABEL, color: '#000' },
-    },
+    ...actorLabelShapes(name, cx, pos.y + sz.h - 4, fontFam),
   ];
 }
 
@@ -1180,28 +1453,50 @@ function drawUsecase(name: string, pos: Position, sz: BoxSize, stereotype?: stri
 }
 
 /**
- * Draws a multi-block usecase: a stadium / rounded-rect outline with text
- * rows and horizontal separator lines stacked vertically inside. The shape
- * choice (rounded rect, not ellipse) matches PlantUML's behavior when the
- * usecase label spans multiple lines.
+ * Draws a multi-block usecase: an ELLIPSE outline (matching PlantUML) with
+ * text rows and horizontal separator lines stacked vertically inside. The
+ * ellipse's rx/ry were sized by `measureBlocks` so the content's inscribed
+ * rectangle fits inside.
+ *
+ * Separator lines are clipped to the ellipse chord at their y position so
+ * they don't poke through the curved sides. Each chord half-width is
+ * `rx * sqrt(1 - (dy/ry)^2)` where `dy` is the line's vertical offset from
+ * the ellipse center.
  */
 function drawUsecaseBlocks(blocks: LabelBlock[], pos: Position, sz: BoxSize): Shape[] {
   const shapes: Shape[] = [];
   const cx = pos.x + sz.w / 2;
+  const cy = pos.y + sz.h / 2;
+  const rx = sz.w / 2;
+  const ry = sz.h / 2;
   const lineHeight = FONT_LABEL * 1.25;
-  const innerLeft = pos.x + UC_BLOCK_PAD_X / 2;
-  const innerRight = pos.x + sz.w - UC_BLOCK_PAD_X / 2;
+
   shapes.push({
-    type: 'rect',
-    x: pos.x,
-    y: pos.y,
-    w: sz.w,
-    h: sz.h,
-    rx: UC_BLOCK_RX,
-    ry: UC_BLOCK_RX,
+    type: 'ellipse',
+    cx,
+    cy,
+    rx,
+    ry,
     style: { fill: COLOR_FILL_UC, stroke: COLOR_LINE, strokeWidth: 1 },
   });
-  let y = pos.y + UC_BLOCK_PAD_Y;
+
+  // Content is centered vertically inside the ellipse. Total content height
+  // is the inner bbox produced by `contentBlockSize`; we start drawing at
+  // `cy - contentH/2` so rows balance above and below the center line.
+  const inner = contentBlockSize(blocks);
+  const contentTop = cy - inner.h / 2;
+  // Tiny inner margin so the dotted separators don't visually touch the
+  // ellipse's curve.
+  const SEP_INSET = 6;
+
+  const chordHalfWidth = (yPos: number): number => {
+    const dy = yPos - cy;
+    const t = 1 - (dy * dy) / (ry * ry);
+    if (t <= 0) return 0;
+    return rx * Math.sqrt(t);
+  };
+
+  let y = contentTop;
   for (const b of blocks) {
     if (b.kind === 'text') {
       const lines = b.text.split('\n');
@@ -1219,58 +1514,66 @@ function drawUsecaseBlocks(blocks: LabelBlock[], pos: Position, sz: BoxSize): Sh
       }
     } else if (b.kind === 'sep-solid') {
       const yLine = y + UC_BLOCK_SEP_H / 2;
+      const half = Math.max(0, chordHalfWidth(yLine) - SEP_INSET);
       shapes.push({
         type: 'line',
-        x1: innerLeft,
+        x1: cx - half,
         y1: yLine,
-        x2: innerRight,
+        x2: cx + half,
         y2: yLine,
         style: { stroke: COLOR_LINE, strokeWidth: 1 },
       });
       y += UC_BLOCK_SEP_H;
     } else if (b.kind === 'sep-double') {
       const yLine = y + UC_BLOCK_SEP_H / 2;
+      const half = Math.max(0, chordHalfWidth(yLine) - SEP_INSET);
       shapes.push({
         type: 'line',
-        x1: innerLeft,
+        x1: cx - half,
         y1: yLine,
-        x2: innerRight,
+        x2: cx + half,
         y2: yLine,
         style: { stroke: COLOR_LINE, strokeWidth: 2 },
       });
       y += UC_BLOCK_SEP_H;
     } else if (b.kind === 'sep-dotted') {
       const yLine = y + UC_BLOCK_SEP_H / 2;
+      const half = Math.max(0, chordHalfWidth(yLine) - SEP_INSET);
       shapes.push({
         type: 'line',
-        x1: innerLeft,
+        x1: cx - half,
         y1: yLine,
-        x2: innerRight,
+        x2: cx + half,
         y2: yLine,
         style: { stroke: COLOR_LINE, strokeWidth: 1, strokeDasharray: '2,3' },
       });
       y += UC_BLOCK_SEP_H;
     } else if (b.kind === 'sep-titled') {
-      const yLine = y + UC_BLOCK_SEP_H / 2;
-      shapes.push({
-        type: 'line',
-        x1: innerLeft,
-        y1: yLine,
-        x2: innerRight,
-        y2: yLine,
-        style: { stroke: COLOR_LINE, strokeWidth: 1, strokeDasharray: '2,3' },
-      });
-      // Centered title sits just above the dotted line.
+      // The title occupies its OWN row band ABOVE the dotted separator line,
+      // matching the measurement budget (`UC_BLOCK_SEP_H + lineHeight`). Draw
+      // order: title row first (y .. y+lineHeight), then dotted line in the
+      // separator strip below.
       shapes.push({
         type: 'text',
         x: cx,
-        y: yLine - 2,
+        y: y + lineHeight * 0.8,
         text: b.text,
         anchor: 'middle',
         baseline: 'alphabetic',
         font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
       });
-      y += UC_BLOCK_SEP_H + lineHeight;
+      y += lineHeight;
+      const yLine = y + UC_BLOCK_SEP_H / 2;
+      const half = Math.max(0, chordHalfWidth(yLine) - SEP_INSET);
+      shapes.push({
+        type: 'line',
+        x1: cx - half,
+        y1: yLine,
+        x2: cx + half,
+        y2: yLine,
+        style: { stroke: COLOR_LINE, strokeWidth: 1, strokeDasharray: '2,3' },
+      });
+      y += UC_BLOCK_SEP_H;
     }
   }
   return shapes;
@@ -1292,5 +1595,42 @@ function emptyScene(): Scene {
         font: { family: FONT_FAMILY, size: 12, color: '#999' },
       },
     ],
+  };
+}
+
+/**
+ * Render a use-case diagram that has only `json NAME { ... }` blocks (no
+ * actors / use cases). Each block lays out via the shared `layoutKvTree`
+ * primitive and is translated into a vertical strip with the standard page
+ * padding. Bounding box grows to fit the widest / tallest block.
+ */
+function layoutJsonOnlyScene(jsonNodes: NonNullable<UseCaseAst['jsonNodes']>): Scene {
+  const JSON_BLOCK_GAP = 24;
+  const shapes: Shape[] = [];
+  let cursorY = PAGE_PAD;
+  let totalW = PAGE_PAD * 2;
+  for (const jn of jsonNodes) {
+    const jsonScene = layoutKvTree({
+      title: '',
+      data: jn.data,
+      highlights: [],
+      parseError: jn.parseError ?? '',
+      errorLabel: 'JSON parse error',
+    });
+    shapes.push({
+      type: 'group',
+      transform: `translate(${PAGE_PAD},${cursorY})`,
+      children: jsonScene.children,
+    });
+    if (PAGE_PAD + jsonScene.width + PAGE_PAD > totalW) {
+      totalW = PAGE_PAD + jsonScene.width + PAGE_PAD;
+    }
+    cursorY += jsonScene.height + JSON_BLOCK_GAP;
+  }
+  return {
+    width: totalW,
+    height: cursorY - JSON_BLOCK_GAP + PAGE_PAD,
+    background: '#fff',
+    children: shapes,
   };
 }

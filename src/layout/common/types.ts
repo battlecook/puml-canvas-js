@@ -25,6 +25,30 @@ export interface EdgeAttrs {
   sourceMult?: string;
   targetMult?: string;
   labelDirection?: LabelDirection;
+  /**
+   * Per-edge stroke colour override. When set, takes precedence over the
+   * diagram-wide `EdgeStyle.color` for the line, arrow head, and any
+   * multiplicity glyphs of this edge. Use case diagrams populate this from an
+   * inline `#<styleBlock>` between the target and the `:` label.
+   */
+  lineColor?: string;
+  /**
+   * Per-edge line-style override mirroring the four PlantUML inline-style
+   * tokens. Overrides the structural `style` for rendering only — the
+   * underlying `style` still classifies the arrow's semantic kind (e.g.
+   * dependency vs. association).
+   *
+   * - `'solid'` / `'dashed'` — render normal-weight stroke, dasharray follows
+   *   the name.
+   * - `'dotted'` — short-dash dasharray (`2,2`).
+   * - `'bold'` — thicker stroke with no dasharray.
+   */
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold';
+  /**
+   * Per-edge text colour override for the label, mapped from the
+   * `text:<colorName>` token of an inline `#<styleBlock>`.
+   */
+  textColor?: string;
 }
 
 export interface EdgeStyle {

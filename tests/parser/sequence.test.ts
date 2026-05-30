@@ -236,6 +236,19 @@ describe('sequence parser — activations', () => {
       { type: 'deactivate', target: 'A' },
     ]);
   });
+
+  it('parses `activate NAME #color` and captures the color on the AST', () => {
+    const a = ast(
+      '@startuml\nactivate A #FFBBBB\nactivate B #DarkSalmon\nactivate C\n@enduml',
+    );
+    expect(a.statements).toMatchObject([
+      { type: 'activate', target: 'A', color: '#FFBBBB' },
+      { type: 'activate', target: 'B', color: '#DarkSalmon' },
+      { type: 'activate', target: 'C' },
+    ]);
+    // No `color` field on the bare-form activation.
+    expect((a.statements[2] as { color?: string }).color).toBeUndefined();
+  });
 });
 
 describe('sequence parser — groups', () => {
@@ -315,6 +328,35 @@ describe('sequence parser — groups', () => {
     expect(
       (a.statements[0] as { branchColor?: string }).branchColor,
     ).toBeUndefined();
+  });
+
+  it('splits `group <primary> [<secondary>]` into label + label2', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'Alice -> Bob: Authentication Request',
+        'group My own label [My own label 2]',
+        '  Alice -> Bob: DNS Attack',
+        'end',
+        '@enduml',
+      ].join('\n'),
+    );
+    const starts = a.statements.filter((s) => s.type === 'groupStart') as Array<{
+      kind: string; label: string; label2?: string;
+    }>;
+    expect(starts[0]).toMatchObject({
+      kind: 'group',
+      label: 'My own label',
+      label2: 'My own label 2',
+    });
+  });
+
+  it('leaves `loop 1000 times` as a plain label (no label2)', () => {
+    const a = ast('@startuml\nloop 1000 times\nA -> B\nend\n@enduml');
+    const start = a.statements[0] as { kind: string; label: string; label2?: string };
+    expect(start.kind).toBe('loop');
+    expect(start.label).toBe('1000 times');
+    expect(start.label2).toBeUndefined();
   });
 });
 
@@ -747,6 +789,55 @@ describe('sequence parser — participants extended', () => {
     expect(note.text).toBe('line1\nline2');
   });
 
+  it('rnote/hnote block opener may carry the first body line', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'caller -> server',
+        'rnote over server "r" as rectangle',
+        '"h" as hexagon',
+        'endrnote',
+        'hnote over caller first hex line',
+        'second hex line',
+        'endhnote',
+        '@enduml',
+      ].join('\n'),
+    );
+    const notes = a.statements.filter((s) => s.type === 'note') as Array<{
+      shape: string; targets: string[]; text: string;
+    }>;
+    expect(notes).toHaveLength(2);
+    expect(notes[0]).toMatchObject({
+      shape: 'rnote',
+      targets: ['server'],
+      text: '"r" as rectangle\n"h" as hexagon',
+    });
+    expect(notes[1]).toMatchObject({
+      shape: 'hnote',
+      targets: ['caller'],
+      text: 'first hex line\nsecond hex line',
+    });
+  });
+
+  it('`/` directive marks the following note with alignToPrev', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'note over Alice : initial state of Alice',
+        '/',
+        'note over Bob : initial state of Bob',
+        'Bob -> Alice : hello',
+        '@enduml',
+      ].join('\n'),
+    );
+    const notes = a.statements.filter((s) => s.type === 'note') as Array<{
+      targets: string[]; alignToPrev?: boolean;
+    }>;
+    expect(notes).toHaveLength(2);
+    expect(notes[0].alignToPrev).toBeUndefined();
+    expect(notes[1]).toMatchObject({ targets: ['Bob'], alignToPrev: true });
+  });
+
   it('parses `newpage` (bare and with title, \\n unescaped)', () => {
     const a = ast(
       [
@@ -765,6 +856,31 @@ describe('sequence parser — participants extended', () => {
     expect(newpages).toHaveLength(2);
     expect(newpages[0]).toEqual({ type: 'newpage', title: '' });
     expect(newpages[1]).toEqual({ type: 'newpage', title: 'A title for the\nlast page' });
+  });
+
+  it('parses `ignore newpage` as a diagram-level flag', () => {
+    const a = ast(
+      [
+        '@startuml',
+        '',
+        'ignore newpage',
+        '',
+        'Alice -> Bob : message 1',
+        'Alice -> Bob : message 2',
+        '',
+        'newpage',
+        '',
+        'Alice -> Bob : message 3',
+        'Alice -> Bob : message 4',
+        '',
+        'newpage A title for the\\nlast page',
+        '',
+        'Alice -> Bob : message 5',
+        'Alice -> Bob : message 6',
+        '@enduml',
+      ].join('\n'),
+    );
+    expect(a.ignoreNewpage).toBe(true);
   });
 
   it('parses inline `header` and `footer`', () => {
@@ -1204,13 +1320,16 @@ describe('sequence parser — skinparam', () => {
     // One-liner forms.
     expect(skin['backgroundcolor']).toBe('#EEEBDC');
     expect(skin['handwritten']).toBe('true');
-    // Block-form values (group `sequence` flattened into the same map).
-    expect(skin['arrowcolor']).toBe('DeepSkyBlue');
-    expect(skin['participantfontname']).toBe('Impact');
-    expect(skin['actorfontsize']).toBe('17');
-    expect(skin['actorbackgroundcolor']).toBe('aqua');
-    expect(skin['lifelinebordercolor']).toBe('blue');
-    expect(skin['lifelinebackgroundcolor']).toBe('#A9DCDF');
+    // Block-form values are stored with the group name as a dotted prefix
+    // (`sequence.<prop>`) so they don't conflate with same-named top-level
+    // one-liners. The sequence layout reader prefers the prefixed key but
+    // falls back to the unprefixed one for top-level one-liners.
+    expect(skin['sequence.arrowcolor']).toBe('DeepSkyBlue');
+    expect(skin['sequence.participantfontname']).toBe('Impact');
+    expect(skin['sequence.actorfontsize']).toBe('17');
+    expect(skin['sequence.actorbackgroundcolor']).toBe('aqua');
+    expect(skin['sequence.lifelinebordercolor']).toBe('blue');
+    expect(skin['sequence.lifelinebackgroundcolor']).toBe('#A9DCDF');
   });
 
   it('strips skinparam lines from downstream parsing — participants/messages survive intact', () => {
@@ -1328,8 +1447,52 @@ describe('sequence parser — `hide unlinked`', () => {
   });
 
   it('silently accepts other `hide ...` variants without touching `hideUnlinked`', () => {
-    const a = ast('@startuml\nhide footbox\nA -> B\n@enduml');
+    const a = ast('@startuml\nhide members\nA -> B\n@enduml');
     expect(a.hideUnlinked).toBeUndefined();
     expect(a.statements.map((s) => s.type)).toEqual(['message']);
+  });
+
+  it('sets `hideFootbox` on the AST when `hide footbox` is present', () => {
+    const a = ast('@startuml\nhide footbox\nA -> B\n@enduml');
+    expect(a.hideFootbox).toBe(true);
+    expect(a.hideUnlinked).toBeUndefined();
+    // The directive line itself doesn't leak into the statement list.
+    expect(a.statements.map((s) => s.type)).toEqual(['message']);
+  });
+});
+
+describe('sequence parser — standalone `destroy` directive', () => {
+  it('emits a DestroyStmt for `destroy C` on its own line', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'B -> C: hi',
+        'destroy C',
+        '@enduml',
+      ].join('\n'),
+    );
+    // Participants implicitly declared by the message and re-affirmed by the
+    // standalone destroy.
+    expect(a.participants.map((p) => p.id)).toEqual(['B', 'C']);
+    const types = a.statements.map((s) => s.type);
+    expect(types).toEqual(['message', 'destroy']);
+    const destroy = a.statements[1] as { type: 'destroy'; target: string };
+    expect(destroy.target).toBe('C');
+  });
+
+  it('distinguishes `destroy C` from the `!!` message suffix', () => {
+    const a = ast(
+      [
+        '@startuml',
+        'B -> C: hi',
+        'B -> C !!: bye',
+        'destroy C',
+        '@enduml',
+      ].join('\n'),
+    );
+    const types = a.statements.map((s) => s.type);
+    expect(types).toEqual(['message', 'message', 'destroy']);
+    expect((a.statements[1] as { destroy?: boolean }).destroy).toBe(true);
+    expect(a.statements[2]).toMatchObject({ type: 'destroy', target: 'C' });
   });
 });

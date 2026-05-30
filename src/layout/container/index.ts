@@ -78,6 +78,21 @@ const COLOR_DATABASE_FILL = '#f4f6fb';
 const COLOR_OBJECT_FILL = '#fefece';
 const COLOR_INTERFACE_FILL = '#fff';
 
+// Note (folded-corner rectangle) constants. Matches the use-case diagram's
+// note palette (#FEFFDD fill, #A0A088 stroke) so attached notes look the same
+// across diagram families.
+const NOTE_PAD_X = 8;
+const NOTE_PAD_Y = 6;
+const NOTE_FOLD = 8;
+const NOTE_MIN_W = 60;
+// Maximum rendered text width (in px) for a single note line before it is
+// auto-wrapped on word boundaries by `wrapNoteText`. Lines split explicitly
+// with `\n` are preserved verbatim; only over-long single lines auto-wrap.
+const MAX_NOTE_W = 180;
+const COLOR_NOTE_FILL = '#FEFFDD';
+const COLOR_NOTE_STROKE = '#A0A088';
+const NOTE_FONT = 12;
+
 const EDGE_STYLE: EdgeStyle = {
   color: COLOR_EDGE,
   fontFamily: FONT_FAMILY,
@@ -90,6 +105,17 @@ export function layoutContainer(ast: ContainerAst): Scene {
   if (hasAnyChildren(ast.nodes)) {
     return layoutNested(ast);
   }
+
+  // Attached notes (those with an anchorId) are pinned next to their anchor
+  // after the main flow is placed and never participate in the sugiyama
+  // layered layout — they have no relationships of their own and would only
+  // introduce orphan layers. Mirrors the use-case parser/layout split.
+  const attachedNotes = ast.nodes.filter(
+    (n) => n.nodeKind === 'note' && n.anchorId,
+  );
+  const attachedNoteIds = new Set(attachedNotes.map((n) => n.id));
+  const flowNodes = ast.nodes.filter((n) => !attachedNoteIds.has(n.id));
+  const flowAst: ContainerAst = { ...ast, nodes: flowNodes };
 
   const sizes = new Map(ast.nodes.map((n) => [n.id, measureNode(n)]));
   const titleHeight = ast.title ? TITLE_FONT + TITLE_GAP : 0;
@@ -115,12 +141,74 @@ export function layoutContainer(ast: ContainerAst): Scene {
 
   const base =
     nonLoops.length === 0
-      ? gridLayout(ast, sizes, titleHeight)
-      : layeredLayout(ast, sizes, titleHeight, nonLoops.map(asRel));
+      ? gridLayout(flowAst, sizes, titleHeight)
+      : layeredLayout(flowAst, sizes, titleHeight, nonLoops.map(asRel));
 
   const extraRight = selfLoopExtraWidth(selfLoops, base.positions, sizes);
   const titleW = ast.title ? measureText(ast.title, TITLE_FONT).width + PAGE_PAD * 2 : 0;
-  const totalWidth = Math.max(base.width + extraRight, titleW);
+  let totalWidth = Math.max(base.width + extraRight, titleW);
+  let totalHeight = base.height;
+
+  // Pin attached notes next to their anchor's bounding box. The anchor must
+  // already have a position from the main layout; otherwise we silently drop
+  // the note (cleaner than rendering it at (0,0)). When a `top` or `left`
+  // attached note would extend past the page padding we shift every laid-out
+  // position by the required offset so the whole diagram stays inside the
+  // page padding (mirrors the use-case parser's `normalizeOrigin` step but
+  // applied only when an attached note caused the overflow).
+  const NOTE_GAP = 12;
+  const noteCoords = new Map<string, Position>();
+  let shiftX = 0;
+  let shiftY = 0;
+  for (const note of attachedNotes) {
+    const anchorPos = base.positions.get(note.anchorId!);
+    const anchorSz = sizes.get(note.anchorId!);
+    const noteSz = sizes.get(note.id);
+    if (!anchorPos || !anchorSz || !noteSz) continue;
+    const side = note.anchorSide ?? 'right';
+    let nx: number;
+    let ny: number;
+    if (side === 'right') {
+      nx = anchorPos.x + anchorSz.w + NOTE_GAP;
+      ny = anchorPos.y + (anchorSz.h - noteSz.h) / 2;
+    } else if (side === 'left') {
+      nx = anchorPos.x - noteSz.w - NOTE_GAP;
+      ny = anchorPos.y + (anchorSz.h - noteSz.h) / 2;
+    } else if (side === 'top') {
+      nx = anchorPos.x + (anchorSz.w - noteSz.w) / 2;
+      ny = anchorPos.y - noteSz.h - NOTE_GAP;
+    } else {
+      nx = anchorPos.x + (anchorSz.w - noteSz.w) / 2;
+      ny = anchorPos.y + anchorSz.h + NOTE_GAP;
+    }
+    noteCoords.set(note.id, { x: nx, y: ny });
+    if (PAGE_PAD - nx > shiftX) shiftX = PAGE_PAD - nx;
+    if (PAGE_PAD - ny > shiftY) shiftY = PAGE_PAD - ny;
+  }
+  if (shiftX > 0 || shiftY > 0) {
+    // Translate every existing position (flow nodes) so the top-left attached
+    // notes fit within the page padding. Without this step a `note top of X`
+    // around the topmost node would sit at a negative y coordinate.
+    for (const [id, pos] of base.positions) {
+      base.positions.set(id, { x: pos.x + shiftX, y: pos.y + shiftY });
+    }
+    totalWidth += shiftX;
+    totalHeight += shiftY;
+  }
+  for (const [id, coord] of noteCoords) {
+    base.positions.set(id, { x: coord.x + shiftX, y: coord.y + shiftY });
+  }
+  for (const note of attachedNotes) {
+    const pos = base.positions.get(note.id);
+    const noteSz = sizes.get(note.id);
+    if (!pos || !noteSz) continue;
+    if (pos.x + noteSz.w + PAGE_PAD > totalWidth) {
+      totalWidth = pos.x + noteSz.w + PAGE_PAD;
+    }
+    if (pos.y + noteSz.h + PAGE_PAD > totalHeight) {
+      totalHeight = pos.y + noteSz.h + PAGE_PAD;
+    }
+  }
 
   if (ast.title) {
     shapes.push({
@@ -192,7 +280,7 @@ export function layoutContainer(ast: ContainerAst): Scene {
     ? FOOTER_GAP + footerLines.length * FOOTER_LINE_H
     : 0;
   if (footerLines.length > 0) {
-    let fy = base.height + FOOTER_GAP + FOOTER_FONT;
+    let fy = totalHeight + FOOTER_GAP + FOOTER_FONT;
     for (const line of footerLines) {
       shapes.push(
         ...drawLabelSpans(
@@ -210,7 +298,7 @@ export function layoutContainer(ast: ContainerAst): Scene {
 
   return {
     width: finalWidth,
-    height: base.height + footerH,
+    height: totalHeight + footerH,
     background: '#fff',
     children: shapes,
   };
@@ -376,6 +464,7 @@ function measureLabelBlocks(blocks: LabelBlock[]): BoxSize {
 
 function measureNode(node: ContainerNode): BoxSize {
   if (node.nodeKind === 'map') return measureMap(node);
+  if (node.nodeKind === 'note') return measureNote(node);
   if (node.labelBlocks && node.labelBlocks.length > 0) {
     const inner = measureLabelBlocks(node.labelBlocks);
     let w = inner.w;
@@ -398,7 +487,7 @@ function measureNode(node: ContainerNode): BoxSize {
     };
   }
 
-  const stereotype = stereotypeFor(node.nodeKind);
+  const stereotype = stereotypeText(node);
   const stereoH = stereotype ? STEREO_H : 0;
   const nameW = measureText(node.name, NAME_FONT).width;
   const stereoW = stereotype ? measureText(stereotype, STEREO_FONT).width : 0;
@@ -421,6 +510,18 @@ function measureNode(node: ContainerNode): BoxSize {
   if (node.nodeKind === 'hexagon') w += 24; // accommodate side wings
   if (node.nodeKind === 'stack') h += 12; // accommodate stack slivers
   return { w, h: Math.max(MIN_H, h) };
+}
+
+/**
+ * Resolve the stereotype label to render above a node's name. An explicit
+ * `node.stereotype` (set by the Archimate parser) takes precedence over the
+ * kind-derived default so element types like `«technology-device»` flow
+ * through unchanged. The result is wrapped in guillemets to match PlantUML's
+ * default stereotype styling.
+ */
+function stereotypeText(node: ContainerNode): string {
+  if (node.stereotype) return `«${node.stereotype}»`;
+  return stereotypeFor(node.nodeKind);
 }
 
 function stereotypeFor(k: ContainerNodeKind): string {
@@ -446,11 +547,13 @@ function stereotypeFor(k: ContainerNodeKind): string {
     case 'object':    return '';
     case 'map':       return '';
     case 'interface': return '';
+    case 'note':      return '';
   }
 }
 
 function drawNode(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
   switch (node.nodeKind) {
+    case 'note':      return drawContainerNote(node.text ?? node.name, pos, sz);
     case 'interface': return drawInterface(node.name, pos, sz);
     case 'node':      return drawDeploymentNode(node, pos, sz);
     case 'cloud':     return drawCloud(node, pos, sz);
@@ -1110,6 +1213,111 @@ function drawMap(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
   return shapes;
 }
 
+/**
+ * Word-wraps a single note line so no resulting line's rendered width exceeds
+ * MAX_NOTE_W. Preserves whitespace between words; if a single word is wider
+ * than the cap it is kept on its own line (we don't break inside words).
+ * Mirrors the use-case diagram's helper of the same name.
+ */
+function wrapNoteLine(line: string): string[] {
+  if (measureText(line, NOTE_FONT).width <= MAX_NOTE_W) return [line];
+  const tokens = line.split(/(\s+)/);
+  const out: string[] = [];
+  let cur = '';
+  for (const tok of tokens) {
+    if (tok === '') continue;
+    if (cur === '') {
+      cur = tok;
+      continue;
+    }
+    const candidate = cur + tok;
+    if (measureText(candidate, NOTE_FONT).width > MAX_NOTE_W) {
+      out.push(cur.replace(/\s+$/, ''));
+      cur = /^\s+$/.test(tok) ? '' : tok;
+    } else {
+      cur = candidate;
+    }
+  }
+  if (cur !== '' && !/^\s+$/.test(cur)) out.push(cur);
+  return out.length > 0 ? out : [line];
+}
+
+/**
+ * Apply `wrapNoteLine` to each explicit line in `text`, returning the joined
+ * (possibly multi-line) result. Original `\n` boundaries are preserved — only
+ * single long lines auto-wrap.
+ */
+function wrapNoteText(text: string): string {
+  return text.split('\n').flatMap((l) => wrapNoteLine(l)).join('\n');
+}
+
+function measureNote(node: ContainerNode): BoxSize {
+  const wrapped = wrapNoteText(node.text ?? node.name);
+  const lines = wrapped.split('\n');
+  let maxLineW = 0;
+  const lineH = NOTE_FONT * 1.25;
+  let totalH = 0;
+  for (const ln of lines) {
+    const m = measureText(ln, NOTE_FONT);
+    if (m.width > maxLineW) maxLineW = m.width;
+    totalH += lineH;
+  }
+  return {
+    w: Math.max(NOTE_MIN_W, maxLineW + NOTE_PAD_X * 2),
+    h: totalH + NOTE_PAD_Y * 2,
+  };
+}
+
+/**
+ * Folded-corner rectangle ("post-it" look) for container-diagram notes. Light
+ * yellow rect with the top-right corner dog-eared; mirrors the use-case
+ * diagram's `drawUsecaseNote` so attached notes look uniform across diagram
+ * families. Multi-line bodies (split on `\n`) stack vertically inside.
+ */
+function drawContainerNote(text: string, pos: Position, sz: BoxSize): Shape[] {
+  const shapes: Shape[] = [];
+  const x = pos.x;
+  const y = pos.y;
+  const w = sz.w;
+  const h = sz.h;
+  const noteStyle = { fill: COLOR_NOTE_FILL, stroke: COLOR_NOTE_STROKE, strokeWidth: 1 };
+  const foldStyle = { fill: 'none', stroke: COLOR_NOTE_STROKE, strokeWidth: 1 };
+  shapes.push({
+    type: 'polygon',
+    points: [
+      [x, y],
+      [x + w - NOTE_FOLD, y],
+      [x + w, y + NOTE_FOLD],
+      [x + w, y + h],
+      [x, y + h],
+    ],
+    style: noteStyle,
+  });
+  shapes.push({
+    type: 'polyline',
+    points: [
+      [x + w - NOTE_FOLD, y],
+      [x + w - NOTE_FOLD, y + NOTE_FOLD],
+      [x + w, y + NOTE_FOLD],
+    ],
+    style: foldStyle,
+  });
+  const lines = wrapNoteText(text).split('\n');
+  const lineH = NOTE_FONT * 1.25;
+  for (let i = 0; i < lines.length; i++) {
+    shapes.push({
+      type: 'text',
+      x: x + NOTE_PAD_X,
+      y: y + NOTE_PAD_Y + NOTE_FONT * 0.9 + i * lineH,
+      text: lines[i]!,
+      anchor: 'start',
+      baseline: 'alphabetic',
+      font: { family: FONT_FAMILY, size: NOTE_FONT, color: '#000' },
+    });
+  }
+  return shapes;
+}
+
 function drawBoxWithStereotype(
   node: ContainerNode,
   pos: Position,
@@ -1127,7 +1335,7 @@ function drawBoxWithStereotype(
 }
 
 function drawStereotypeAndName(node: ContainerNode, pos: Position, sz: BoxSize): Shape[] {
-  const stereotype = stereotypeFor(node.nodeKind);
+  const stereotype = stereotypeText(node);
   const cx = pos.x + sz.w / 2;
   const textColor = node.textColor ?? '#000';
   const result: Shape[] = [];

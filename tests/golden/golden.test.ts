@@ -5,10 +5,6 @@ describe('golden — placeholder/unknown', () => {
   it('renders unknown when wrapper is missing', () => {
     expectGolden('phase0/no-wrapper', 'just text');
   });
-
-  it('renders placeholder for salt diagram (not yet implemented)', () => {
-    expectGolden('phase0/placeholder-salt', '@startsalt\n{ Button1 | Button2 }\n@endsalt');
-  });
 });
 
 describe('golden — sequence', () => {

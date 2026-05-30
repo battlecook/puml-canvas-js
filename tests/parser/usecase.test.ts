@@ -47,6 +47,22 @@ describe('use case parser', () => {
     });
   });
 
+  it('expands \\n escapes in arrow labels to real newlines', () => {
+    const a = ast([
+      '@startuml',
+      'User -> (Start)',
+      'User --> (Use the application) : A small label',
+      ':Main Admin: ---> (Use the application) : This is\\nyet another\\nlabel',
+      '@enduml',
+    ].join('\n'));
+    // Third relationship is the one with \n escapes; assert the stored label
+    // contains real newlines, not the two-char `\n` sequence.
+    const third = a.relationships[2]!;
+    expect(third.label).toBe('This is\nyet another\nlabel');
+    expect(third.label).not.toContain('\\n');
+    expect(third.label.split('\n')).toHaveLength(3);
+  });
+
   it('captures title', () => {
     const a = ast('@startuml\ntitle Auth flow\nactor U\n@enduml');
     expect(a.title).toBe('Auth flow');
@@ -160,17 +176,23 @@ describe('use case parser', () => {
       'User -> (Start)',
       '@enduml',
     ].join('\n'));
-    // Default (un-scoped) keys are present, lower-cased.
-    expect(a.skin?.['backgroundcolor']).toBe('DarkSeaGreen');
-    expect(a.skin?.['bordercolor']).toBe('DarkSlateGray');
-    expect(a.skin?.['arrowcolor']).toBe('Olive');
-    expect(a.skin?.['actorbordercolor']).toBe('black');
-    expect(a.skin?.['actorfontname']).toBe('Courier');
+    // Nested-in-block keys are stored with the group as a dotted prefix
+    // (`usecase.<prop>`) so a nested `BackgroundColor` doesn't clobber the
+    // canvas-level top-level `backgroundcolor`. Top-level `handwritten`
+    // remains unprefixed.
+    expect(a.skin?.['usecase.backgroundcolor']).toBe('DarkSeaGreen');
+    expect(a.skin?.['usecase.bordercolor']).toBe('DarkSlateGray');
+    expect(a.skin?.['usecase.arrowcolor']).toBe('Olive');
+    expect(a.skin?.['usecase.actorbordercolor']).toBe('black');
+    expect(a.skin?.['usecase.actorfontname']).toBe('Courier');
     expect(a.skin?.['handwritten']).toBe('true');
-    // Stereotype-scoped overrides are preserved as `prop<<stereo>>` keys.
-    expect(a.skin?.['backgroundcolor<<main>>']).toBe('YellowGreen');
-    expect(a.skin?.['bordercolor<<main>>']).toBe('YellowGreen');
-    expect(a.skin?.['actorbackgroundcolor<<human>>']).toBe('Gold');
+    // The page canvas key MUST NOT be set by a nested `usecase {
+    // BackgroundColor X }` — the canvas stays white/transparent.
+    expect(a.skin?.['backgroundcolor']).toBeUndefined();
+    // Stereotype-scoped overrides carry the same group prefix.
+    expect(a.skin?.['usecase.backgroundcolor<<main>>']).toBe('YellowGreen');
+    expect(a.skin?.['usecase.bordercolor<<main>>']).toBe('YellowGreen');
+    expect(a.skin?.['usecase.actorbackgroundcolor<<human>>']).toBe('Gold');
     // Stereotypes still attach to nodes normally.
     const user = a.nodes.find((n) => n.id === 'User');
     expect(user?.stereotype).toBe('Human');
@@ -368,6 +390,15 @@ describe('use case parser', () => {
     expect(notes.filter((n) => n.anchorId).length).toBe(2);
     expect(notes.find((n) => n.id === 'N2')!.text).toContain('several objects');
 
+    // Bug-fix regression: the `note right of (Use)` block must preserve the
+    // line break between body rows as a literal `\n`, not collapse them into
+    // a single space-joined string. The layout renderer splits on `\n` to
+    // emit one text shape per line, so flattening here would silently drop
+    // a row from the rendered note.
+    const useNote = notes.find((n) => n.anchorId === 'Use')!;
+    expect(useNote.text).toBe('A note can also\nbe on several lines');
+    expect(useNote.text!.split('\n')).toHaveLength(2);
+
     // Three flow arrows + two `..` dashed lines into N2.
     const dashed = a.relationships.filter((r) => r.style === 'dashed');
     expect(dashed.length).toBeGreaterThanOrEqual(2);
@@ -545,6 +576,39 @@ describe('use case parser', () => {
     });
   });
 
+  it('keeps pre-declared actors out of a container they are merely referenced in', () => {
+    // Regression: `customer` and `clerk` are declared BEFORE
+    // `rectangle checkout { ... }`. Inside the block they only appear as
+    // relationship endpoints (`customer -- (checkout)` / `(checkout) -- clerk`).
+    // The container's `childIds` must therefore include only the use cases
+    // declared/auto-promoted inside the braces (`checkout`, `payment`, `help`)
+    // — adding `customer` / `clerk` would make the layout treat them as
+    // members of the boundary box and render them inside the rectangle.
+    const a = ast([
+      '@startuml',
+      'left to right direction',
+      'actor customer',
+      'actor clerk',
+      'rectangle checkout {',
+      '  customer -- (checkout)',
+      '  (checkout) .> (payment) : include',
+      '  (help) .> (checkout) : extends',
+      '  (checkout) -- clerk',
+      '}',
+      '@enduml',
+    ].join('\n'));
+
+    expect(a.containers).toHaveLength(1);
+    const checkout = a.containers[0]!;
+    // Members are ONLY use cases declared / auto-promoted inside the block.
+    expect(checkout.childIds).toEqual(['checkout', 'payment', 'help']);
+    expect(checkout.childIds).not.toContain('customer');
+    expect(checkout.childIds).not.toContain('clerk');
+    // Both actors still exist as global nodes; they're just not members.
+    const actorIds = a.nodes.filter((n) => n.kind === 'actor').map((n) => n.id);
+    expect(actorIds).toEqual(['customer', 'clerk']);
+  });
+
   it('captures `top to bottom direction` as the explicit TB default', () => {
     const a = ast([
       '@startuml',
@@ -596,6 +660,21 @@ describe('use case parser', () => {
 
     const person1 = actors.find((n) => n.id === 'Person1');
     expect(person1).toMatchObject({ name: 'Last actor', business: true });
+  });
+
+  it('expands `\\n` to a real newline in :Display: actor names (with or without `/`)', () => {
+    // Bug fix: `:Another\nactor:/ as Man2` and the non-business equivalent
+    // must both expose `name` as a string containing a real `\n`, so layout
+    // can split the label across rows.
+    const business = ast('@startuml\n:Another\\nactor:/ as Man2\n@enduml');
+    const m2 = business.nodes.find((n) => n.id === 'Man2');
+    expect(m2?.name).toBe('Another\nactor');
+    expect(m2?.name.includes('\n')).toBe(true);
+
+    const plain = ast('@startuml\n:Another\\nactor: as Man2\n@enduml');
+    const p2 = plain.nodes.find((n) => n.id === 'Man2');
+    expect(p2?.name).toBe('Another\nactor');
+    expect(p2?.name.includes('\n')).toBe(true);
   });
 
   it('flags business use cases declared with the `/` shorthand', () => {
@@ -651,5 +730,95 @@ describe('use case parser', () => {
     // Targets are still declared as usecases (paren shorthand wins).
     const dummyLeft = a.nodes.find((n) => n.id === 'dummyLeft');
     expect(dummyLeft?.kind).toBe('usecase');
+  });
+
+  it('parses inline `#<styleBlock>` between target and label (regression: arrows with style suffix were silently dropped)', () => {
+    // The bug: a relationship line whose target was followed by `#…` (the
+    // PlantUML inline style block) would fail the relationship regex because
+    // the `:` inside `line:red` was mistakenly treated as the label separator,
+    // leaving an unparseable `(bar1) #line` tail. Without the fix, only the
+    // first arrow (no style block) survives and bar1/bar2/bar3 vanish.
+    const a = ast([
+      '@startuml',
+      'actor foo',
+      'foo --> (bar) : normal',
+      'foo --> (bar1) #line:red;line.bold;text:red : red bold',
+      'foo --> (bar2) #green;line.dashed;text:green : green dashed',
+      'foo --> (bar3) #blue;line.dotted;text:blue : blue dotted',
+      '@enduml',
+    ].join('\n'));
+
+    // All four relationships present (the bug dropped the last three).
+    expect(a.relationships).toHaveLength(4);
+    const targets = a.relationships.map((r) => r.target);
+    expect(targets).toEqual(['bar', 'bar1', 'bar2', 'bar3']);
+
+    // The unadorned arrow carries no style overrides.
+    expect(a.relationships[0]).toMatchObject({ target: 'bar', label: 'normal' });
+    expect(a.relationships[0]!.lineColor).toBeUndefined();
+    expect(a.relationships[0]!.lineStyle).toBeUndefined();
+    expect(a.relationships[0]!.textColor).toBeUndefined();
+
+    // `#line:red;line.bold;text:red` → red bold stroke, red label.
+    expect(a.relationships[1]).toMatchObject({
+      target: 'bar1',
+      label: 'red bold',
+      lineColor: 'red',
+      lineStyle: 'bold',
+      textColor: 'red',
+    });
+
+    // `#green;line.dashed;text:green` → bare `green` is shorthand for line
+    // colour, plus `line.dashed` and `text:green`.
+    expect(a.relationships[2]).toMatchObject({
+      target: 'bar2',
+      label: 'green dashed',
+      lineColor: 'green',
+      lineStyle: 'dashed',
+      textColor: 'green',
+    });
+
+    // `#blue;line.dotted;text:blue` → blue dotted stroke, blue label.
+    expect(a.relationships[3]).toMatchObject({
+      target: 'bar3',
+      label: 'blue dotted',
+      lineColor: 'blue',
+      lineStyle: 'dotted',
+      textColor: 'blue',
+    });
+
+    // Targets disambiguated by `(…)` are declared as usecases.
+    const bar1 = a.nodes.find((n) => n.id === 'bar1');
+    expect(bar1?.kind).toBe('usecase');
+  });
+
+  it('accepts `allowmixing` and parses an embedded `json NAME { ... }` block', () => {
+    const a = ast([
+      '@startuml',
+      'allowmixing',
+      'actor Actor',
+      'usecase Usecase',
+      'json JSON {',
+      '  "fruit":"Apple",',
+      '  "size":"Large",',
+      '  "color": ["Red", "Green"]',
+      '}',
+      '@enduml',
+    ].join('\n'));
+
+    // The actor and usecase still parse normally — the `allowmixing` line
+    // is silently skipped, not pushed into `nodes` as a stray identifier.
+    expect(a.nodes).toEqual([
+      { id: 'Actor', name: 'Actor', kind: 'actor' },
+      { id: 'Usecase', name: 'Usecase', kind: 'usecase' },
+    ]);
+
+    // The `json JSON { ... }` block is captured separately and the body is
+    // parsed via `JSON.parse` (shared with the standalone JSON diagram path).
+    expect(a.jsonNodes).toHaveLength(1);
+    expect(a.jsonNodes![0]).toEqual({
+      id: 'JSON',
+      data: { fruit: 'Apple', size: 'Large', color: ['Red', 'Green'] },
+    });
   });
 });

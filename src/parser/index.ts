@@ -1,6 +1,7 @@
 import { tokenize } from '../lexer/index.js';
 import type { DiagramAst } from '../ast/index.js';
 import { detectKind } from './detect.js';
+import { preprocessArchimateSource } from './archimate-preprocess.js';
 import { parseSequence } from './sequence/index.js';
 import { parseClass } from './class/index.js';
 import { parseUseCase } from './usecase/index.js';
@@ -17,8 +18,29 @@ import { parseYaml } from './yaml/index.js';
 import { parseEbnf } from './grammar/ebnf.js';
 import { parseRegex } from './grammar/regex.js';
 import { parseTiming } from './timing/index.js';
+import { parseNwdiag } from './nwdiag/index.js';
+import { parseSalt } from './salt/index.js';
 
 export function parse(source: string): DiagramAst {
+  // Pre-pass: strip preprocessor directives we cannot honour (`!define`,
+  // `!include`, sprite/legend/listsprite, stereotype-scoped skinparam blocks)
+  // and expand the small set of hard-coded Archimate `Layer_Element(…)` /
+  // `Rel_…(…)` macros into plain PlantUML the diagram parsers already
+  // accept. Strips the `$` sigil from sprite-referencing stereotypes
+  // (`<<$bProcess>>` → `<<bProcess>>`) and merges adjacent stereotype tags so
+  // the existing single-stereotype regex still matches.
+  // Detect a standalone `listsprite` directive before preprocessing strips it.
+  // PlantUML renders a list of bundled sprites here; we don't bundle any, so
+  // surface a placeholder text rather than letting the diagram collapse to
+  // empty after the directive is removed.
+  if (/^\s*listsprite\s*$/im.test(source)) {
+    return {
+      kind: 'placeholder',
+      detected: 'component',
+      label: '(sprite list — no sprites bundled)',
+    };
+  }
+  source = preprocessArchimateSource(source);
   const detection = detectKind(tokenize(source));
 
   if (detection.kind === 'unknown') {
@@ -89,6 +111,14 @@ export function parse(source: string): DiagramAst {
     return parseTiming(source);
   }
 
+  if (detection.kind === 'nwdiag') {
+    return parseNwdiag(source);
+  }
+
+  if (detection.kind === 'salt') {
+    return parseSalt(source);
+  }
+
   return {
     kind: 'placeholder',
     detected: detection.kind,
@@ -113,3 +143,5 @@ export { parseYaml } from './yaml/index.js';
 export { parseEbnf } from './grammar/ebnf.js';
 export { parseRegex } from './grammar/regex.js';
 export { parseTiming } from './timing/index.js';
+export { parseNwdiag } from './nwdiag/index.js';
+export { parseSalt } from './salt/index.js';

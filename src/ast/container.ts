@@ -1,5 +1,5 @@
 import type { EndMarker } from './class.js';
-import type { LabelBlock } from './usecase.js';
+import type { LabelBlock, NoteSide } from './usecase.js';
 
 export type ContainerNodeKind =
   | 'component'
@@ -22,7 +22,8 @@ export type ContainerNodeKind =
   | 'hexagon'
   | 'process'
   | 'stack'
-  | 'package';
+  | 'package'
+  | 'note';
 
 export type ContainerLineStyle = 'solid' | 'dashed' | 'dotted' | 'bold';
 
@@ -68,6 +69,30 @@ export interface ContainerNode {
   lineColor?: string;
   lineStyle?: ContainerLineStyle;
   textColor?: string;
+  /**
+   * Optional element stereotype label (e.g. `technology-device` from
+   * `<<technology-device>>`). Currently populated by the Archimate node form
+   * (`archimate #Layer "Display" as id <<stereotype>>`) so layout can render
+   * the stereotype above the name in place of the kind-derived default.
+   */
+  stereotype?: string;
+  /**
+   * For note nodes (`nodeKind: 'note'`), the body text. Multi-line note bodies
+   * are joined with real `\n` characters. Layout splits on `\n` and renders
+   * one line per segment.
+   */
+  text?: string;
+  /**
+   * For attached notes (`note right of X`, etc.), the id of the anchor node
+   * the note is pinned next to. Layout positions the note adjacent to the
+   * anchor's bounding box and excludes it from the sugiyama flow.
+   */
+  anchorId?: string;
+  /**
+   * Which side of the anchor the note sits on. Defaults to `'right'` when
+   * absent.
+   */
+  anchorSide?: NoteSide;
 }
 
 export interface ContainerRelationship {

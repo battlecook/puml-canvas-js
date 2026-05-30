@@ -13,6 +13,8 @@ import { layoutJson } from './json/index.js';
 import { layoutYaml } from './yaml/index.js';
 import { layoutEbnf, layoutRegex } from './grammar/index.js';
 import { layoutTiming } from './timing/index.js';
+import { layoutNwdiag } from './nwdiag/index.js';
+import { layoutSalt } from './salt/index.js';
 
 export function layout(ast: DiagramAst): Scene {
   switch (ast.kind) {
@@ -32,6 +34,8 @@ export function layout(ast: DiagramAst): Scene {
     case 'ebnf':       return layoutEbnf(ast);
     case 'regex':      return layoutRegex(ast);
     case 'timing':     return layoutTiming(ast);
+    case 'nwdiag':     return layoutNwdiag(ast);
+    case 'salt':       return layoutSalt(ast);
     case 'unknown':
     case 'placeholder': return layoutPlaceholder(ast);
   }

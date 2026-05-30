@@ -141,7 +141,7 @@ describe('use case layout', () => {
     expect(texts).toContain('Main Admin');
   });
 
-  it('renders a multi-line usecase label as a rounded rect with horizontal separators', () => {
+  it('renders a multi-line usecase label as an ELLIPSE with horizontal separators', () => {
     const scene = compile([
       '@startuml',
       '',
@@ -158,17 +158,18 @@ describe('use case layout', () => {
       '@enduml',
     ].join('\n'));
 
-    // Multi-line usecase becomes a rounded rectangle (stadium) instead of an
-    // ellipse. The previous fallback would have produced an ellipse.
+    // PlantUML always renders a usecase as an ellipse, even when the label
+    // spans multiple lines with separators. The ellipse simply grows large
+    // enough (rx/ry) to enclose the content's bounding box.
     const ellipses = scene.children.filter((s) => s.type === 'ellipse');
-    expect(ellipses).toHaveLength(0);
+    expect(ellipses).toHaveLength(1);
     const roundedRects = scene.children.filter(
       (s) => s.type === 'rect' && typeof s.rx === 'number' && s.rx > 0,
     );
-    expect(roundedRects.length).toBeGreaterThanOrEqual(1);
+    expect(roundedRects).toHaveLength(0);
 
-    // All interior separators are emitted as `line` shapes spanning roughly
-    // the shape's interior width.
+    // All interior separators are emitted as `line` shapes spanning the
+    // ellipse's chord at their y position.
     const lines = scene.children.filter((s) => s.type === 'line');
     // `--`, `==`, `..Conclusion..` → 3 separator lines minimum.
     expect(lines.length).toBeGreaterThanOrEqual(3);
@@ -190,6 +191,77 @@ describe('use case layout', () => {
       .map((s) => (s as { text: string }).text);
     expect(texts).toContain('Conclusion');
     expect(texts.some((t) => t.includes('large description'))).toBe(true);
+  });
+
+  it('stacks multi-line usecase rows without overlap (regression: titled separator drew its title on top of the previous row)', () => {
+    const scene = compile([
+      '@startuml',
+      '',
+      'usecase UC1 as "You can use',
+      'several lines to define your usecase.',
+      'You can also use separators.',
+      '--',
+      'Several separators are possible.',
+      '==',
+      'And you can add titles:',
+      '..Conclusion..',
+      'This allows large description."',
+      '',
+      '@enduml',
+    ].join('\n'));
+
+    // Every text row inside the stadium must sit strictly below the previous
+    // one by at least one line height (12px font, 1.25 spacing → ~15px).
+    // Before the fix, the `..Conclusion..` title was drawn at the same y-band
+    // as the preceding "And you can add titles:" line, producing a visible
+    // overlap. We additionally require the dotted separator that follows the
+    // title sit below the title's baseline.
+    const MIN_GAP = 12; // ≤ FONT_LABEL * 1.25, allows small rounding slack.
+    const rowYs = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { y: number; text: string }))
+      .map((s) => ({ y: s.y, text: s.text }));
+    // First text row should be inside the stadium, others strictly increasing.
+    for (let i = 1; i < rowYs.length; i++) {
+      expect(rowYs[i]!.y - rowYs[i - 1]!.y).toBeGreaterThanOrEqual(MIN_GAP);
+    }
+
+    // The "Conclusion" title sits ABOVE its dotted separator line, not below
+    // the previous row's text. Find both and assert ordering.
+    const conclusionText = rowYs.find((r) => r.text === 'Conclusion');
+    expect(conclusionText).toBeDefined();
+    const priorText = rowYs.find((r) => r.text === 'And you can add titles:');
+    expect(priorText).toBeDefined();
+    expect(conclusionText!.y - priorText!.y).toBeGreaterThanOrEqual(MIN_GAP);
+    // The dotted separator line that pairs with the title comes right after.
+    const dotted = scene.children.find(
+      (s) => s.type === 'line' && s.style?.strokeDasharray,
+    ) as { y1: number } | undefined;
+    expect(dotted).toBeDefined();
+    expect(dotted!.y1).toBeGreaterThan(conclusionText!.y);
+  });
+
+  it('splits an arrow label containing \\n escapes into stacked text shapes', () => {
+    const scene = compile([
+      '@startuml',
+      'User -> (Start)',
+      'User --> (Use the application) : A small label',
+      ':Main Admin: ---> (Use the application) : This is\\nyet another\\nlabel',
+      '@enduml',
+    ].join('\n'));
+
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    // The three lines of the multi-line label render as three separate text
+    // shapes — the literal `\n` is gone, the words appear on their own rows.
+    expect(texts).toContain('This is');
+    expect(texts).toContain('yet another');
+    expect(texts).toContain('label');
+    // No surviving two-char `\n` sequence in any rendered text.
+    for (const t of texts) {
+      expect(t).not.toContain('\\n');
+    }
   });
 
   it('keeps a simple single-line usecase as an ellipse (regression)', () => {
@@ -298,6 +370,172 @@ describe('use case layout', () => {
         !!s.style?.strokeDasharray,
     );
     expect(dashedEdges.length).toBeGreaterThanOrEqual(2);
+
+    // Bug-fix regression: `note right of Admin` must be anchored to the
+    // Admin actor's bbox, NOT pinned to a global top-of-diagram coordinate.
+    // We assert (a) the note's left edge sits to the RIGHT of Admin's right
+    // edge with a positive gap, and (b) the note's vertical span overlaps
+    // Admin's vertical span (i.e. it's at mid-height, not floating above
+    // the actor). Admin's bbox is reconstructed from its head circle (the
+    // only Admin-specific shape with a stable identifier — it lives at the
+    // same cx as the "Main Admin" label).
+    const adminLabel = scene.children.find(
+      (s) => s.type === 'text' && (s as { text: string }).text === 'Main Admin',
+    ) as { x: number; y: number } | undefined;
+    expect(adminLabel).toBeDefined();
+    // The stickman head is the circle whose cx matches the label's x; the
+    // label sits at the actor box's horizontal center.
+    const adminHead = scene.children.find(
+      (s) => s.type === 'circle' && Math.abs(s.cx - adminLabel!.x) < 0.5,
+    ) as { cx: number; cy: number; r: number } | undefined;
+    expect(adminHead).toBeDefined();
+    // Reconstruct Admin's bbox: the head sits at the top of the actor box,
+    // the label at the bottom. Width is conservatively bounded by the wider
+    // of the head diameter and the label width approximation; the assertion
+    // only needs Admin's RIGHT EDGE, which is at most label.x + half-width.
+    // We use the label's right edge as a tight upper bound for Admin's
+    // right edge in this test (the actor figure is narrower than its label).
+    const adminRightEdge = adminLabel!.x + 40; // half of widest "Main Admin"
+    const adminTop = adminHead!.cy - adminHead!.r;
+    const adminBottom = adminLabel!.y;
+
+    // Find the polygon for "This is an example." — it's the note polygon
+    // whose enclosed text is that string.
+    const exampleText = scene.children.find(
+      (s) => s.type === 'text' && (s as { text: string }).text === 'This is an example.',
+    ) as { x: number; y: number } | undefined;
+    expect(exampleText).toBeDefined();
+    const examplePoly = scene.children.find(
+      (s) =>
+        s.type === 'polygon' &&
+        s.style?.fill === '#FEFFDD' &&
+        s.points.some(([px, py]) => px <= exampleText!.x && py <= exampleText!.y) &&
+        s.points.some(([px, py]) => px >= exampleText!.x && py >= exampleText!.y),
+    ) as { points: Array<[number, number]> } | undefined;
+    expect(examplePoly).toBeDefined();
+    const noteLeftX = Math.min(...examplePoly!.points.map((p) => p[0]));
+    const noteTopY = Math.min(...examplePoly!.points.map((p) => p[1]));
+    const noteBottomY = Math.max(...examplePoly!.points.map((p) => p[1]));
+    // (a) Note left edge sits to the RIGHT of Admin's right edge.
+    expect(noteLeftX).toBeGreaterThan(adminRightEdge);
+    // (b) Note vertical span OVERLAPS Admin's vertical span — i.e. it is
+    // anchored mid-height, not floating above the actor.
+    expect(noteTopY).toBeLessThan(adminBottom);
+    expect(noteBottomY).toBeGreaterThan(adminTop);
+
+    // Bug-fix regression: the block note `note right of (Use)` must split
+    // its body on `\n` and emit ONE text shape per line. The parser joins
+    // body lines with `\n`; the renderer splits on the same separator.
+    const blockNoteTexts = scene.children.filter(
+      (s) =>
+        s.type === 'text' &&
+        ((s as { text: string }).text === 'A note can also' ||
+          (s as { text: string }).text === 'be on several lines'),
+    );
+    expect(blockNoteTexts).toHaveLength(2);
+    // The two lines must NOT be flattened into one joined string.
+    expect(
+      scene.children.find(
+        (s) =>
+          s.type === 'text' &&
+          (s as { text: string }).text === 'A note can also be on several lines',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('word-wraps a long single-line block note body into multiple text shapes', () => {
+    // Bug-fix regression: when a block note's body is a single long line,
+    // it must wrap on word boundaries into multiple rendered lines so the
+    // note box stays compact instead of extending far past the anchor.
+    const scene = compile([
+      '@startuml',
+      ':Main Admin: as Admin',
+      '(Use the application) as (Use)',
+      'User -> (Start)',
+      'User --> (Use)',
+      'Admin ---> (Use)',
+      'note right of Admin : This is an example.',
+      'note right of (Use)',
+      '  A note can also be on several lines',
+      'end note',
+      'note "This note is connected\\nto several objects." as N2',
+      '(Start) .. N2',
+      'N2 .. (Use)',
+      '@enduml',
+    ].join('\n'));
+
+    // The single long line in `note right of (Use)` must wrap into at LEAST
+    // two text shapes. We identify wrap fragments by checking that each text
+    // shape's content is a non-empty substring of the original body — this
+    // is robust against the exact word-boundary the wrap chooses.
+    const fullBody = 'A note can also be on several lines';
+    const wrapFragments = scene.children.filter(
+      (s) =>
+        s.type === 'text' &&
+        (s as { text: string }).text !== fullBody &&
+        (s as { text: string }).text.length > 0 &&
+        fullBody.includes((s as { text: string }).text) &&
+        // Reject substrings that are also substrings of OTHER body strings in
+        // the scene (e.g. the "This is an example." attached note). Each
+        // wrap fragment must contain at least one word from the long body
+        // that doesn't appear in any other note body.
+        ((s as { text: string }).text.includes('A note') ||
+          (s as { text: string }).text.includes('several') ||
+          (s as { text: string }).text.includes('be on') ||
+          (s as { text: string }).text.includes('can also') ||
+          (s as { text: string }).text.includes('lines')),
+    );
+    expect(wrapFragments.length).toBeGreaterThanOrEqual(2);
+
+    // The full unwrapped line must NOT appear as a single text shape.
+    expect(
+      scene.children.find(
+        (s) =>
+          s.type === 'text' && (s as { text: string }).text === fullBody,
+      ),
+    ).toBeUndefined();
+
+    // Short note bodies must still render as a single text shape.
+    expect(
+      scene.children.find(
+        (s) =>
+          s.type === 'text' &&
+          (s as { text: string }).text === 'This is an example.',
+      ),
+    ).toBeDefined();
+    // Explicit `\n` boundaries in the free-standing note are preserved as
+    // separate text shapes (not joined, not further wrapped).
+    expect(
+      scene.children.find(
+        (s) =>
+          s.type === 'text' &&
+          (s as { text: string }).text === 'This note is connected',
+      ),
+    ).toBeDefined();
+    expect(
+      scene.children.find(
+        (s) =>
+          s.type === 'text' &&
+          (s as { text: string }).text === 'to several objects.',
+      ),
+    ).toBeDefined();
+  });
+
+  it('keeps short note bodies on a single line (no spurious wrap)', () => {
+    // Regression: short bodies must remain a single text shape — the wrap
+    // only kicks in when the rendered line width exceeds MAX_NOTE_W.
+    const scene = compile([
+      '@startuml',
+      ':Admin:',
+      '(Use)',
+      'Admin --> (Use)',
+      'note right of Admin : short body',
+      '@enduml',
+    ].join('\n'));
+    const shortTexts = scene.children.filter(
+      (s) => s.type === 'text' && (s as { text: string }).text === 'short body',
+    );
+    expect(shortTexts).toHaveLength(1);
   });
 
   it('places generalization parent above child and merges aliased usecases', () => {
@@ -519,6 +757,16 @@ describe('use case layout', () => {
     const OLIVE = '#808000';
     const GOLD = '#FFD700';
 
+    // Canvas background MUST stay white — the `BackgroundColor DarkSeaGreen`
+    // inside `skinparam usecase { ... }` is the *ellipse* fill, not the page
+    // fill. Only a top-level `skinparam backgroundColor X` should tint the
+    // canvas.
+    expect(scene.background).toBe('#fff');
+    const canvasRect = scene.children.find(
+      (s) => s.type === 'rect' && s.style?.fill === DARK_SEA_GREEN && (s as { x: number }).x === 0,
+    );
+    expect(canvasRect).toBeUndefined();
+
     // Default usecase ellipse fill = DarkSeaGreen for the un-stereotyped
     // (or non-Main) usecases — `Start` here.
     const defaultEllipses = scene.children.filter(
@@ -576,6 +824,56 @@ describe('use case layout', () => {
         /Please use '!option handwritten true'/.test((s as { text: string }).text),
     );
     expect(notice).toBeTruthy();
+  });
+
+  it('keeps nested-block usecase BackgroundColor off the canvas while still tinting un-stereotyped ellipses', () => {
+    // Regression guard for the canvas-vs-ellipse conflation bug: a nested
+    // `skinparam usecase { BackgroundColor X }` directive used to write to
+    // the same flat `backgroundcolor` key as a top-level
+    // `skinparam backgroundColor X` one-liner, so the whole page picked up
+    // the nested color. After the fix the nested key is stored as
+    // `usecase.backgroundcolor` and only the per-ellipse fill consumes it.
+    const scene = compile([
+      '@startuml',
+      '!option handwritten true',
+      'skinparam usecase {',
+      '  BackgroundColor DarkSeaGreen',
+      '  BorderColor DarkSlateGray',
+      '  BackgroundColor<< Main >> YellowGreen',
+      '  BorderColor<< Main >> YellowGreen',
+      '  ArrowColor Olive',
+      '  ActorBorderColor black',
+      '  ActorFontName Courier',
+      '  ActorBackgroundColor<< Human >> Gold',
+      '}',
+      'User << Human >>',
+      ':Main Database: as MySql << Application >>',
+      '(Start) << One Shot >>',
+      '(Use the application) as (Use) << Main >>',
+      'User -> (Start)',
+      'User --> (Use)',
+      'MySql --> (Use)',
+      '@enduml',
+    ].join('\n'));
+
+    const DARK_SEA_GREEN = '#8FBC8F';
+    const YELLOW_GREEN = '#9ACD32';
+
+    // (1) Canvas stays white/transparent — the nested `BackgroundColor`
+    // does NOT leak onto the page.
+    expect(scene.background).toBe('#fff');
+
+    // (2) The un-stereotyped `Start` ellipse picks up the default nested
+    // `BackgroundColor` (DarkSeaGreen).
+    const ellipses = scene.children.filter(
+      (s): s is typeof s & { style?: { fill?: string } } => s.type === 'ellipse',
+    );
+    const darkFill = ellipses.find((e) => e.style?.fill === DARK_SEA_GREEN);
+    expect(darkFill).toBeTruthy();
+
+    // (3) The `<<Main>>` ellipse `Use` picks up the YellowGreen override.
+    const mainFill = ellipses.find((e) => e.style?.fill === YELLOW_GREEN);
+    expect(mainFill).toBeTruthy();
   });
 
   it('renders bare-id endpoints as stick-figure actors and paren endpoints as ellipses', () => {
@@ -676,6 +974,65 @@ describe('use case layout', () => {
     expect(texts).toContain('checkout');
   });
 
+  it('renders pre-declared actors OUTSIDE the rectangle they are referenced in', () => {
+    // Regression: when an actor is declared before a `rectangle X { ... }`
+    // block and only REFERENCED inside (e.g. `customer -- (checkout)`), the
+    // sugiyama layered layout puts it in the same column as the use cases
+    // and slots it visually inside the rectangle's bounding box. The fix
+    // shifts those externals past the container edge so the boundary box
+    // wraps only its declared members.
+    const scene = compile([
+      '@startuml',
+      'left to right direction',
+      'skinparam packageStyle rectangle',
+      'actor customer',
+      'actor clerk',
+      'rectangle checkout {',
+      '  customer -- (checkout)',
+      '  (checkout) .> (payment) : include',
+      '  (help) .> (checkout) : extends',
+      '  (checkout) -- clerk',
+      '}',
+      '@enduml',
+    ].join('\n'));
+
+    const rects = scene.children.filter((s) => s.type === 'rect') as Array<
+      { x: number; y: number; w: number; h: number }
+    >;
+    expect(rects.length).toBeGreaterThanOrEqual(1);
+    // Largest rect is the container boundary.
+    const container = rects.reduce((a, b) => (a.w * a.h >= b.w * b.h ? a : b));
+
+    // Stick-figure heads stay at the same cx as their actor's label text and
+    // are the most stable proxy for actor X positions in the scene.
+    const heads = scene.children.filter((s) => s.type === 'circle') as Array<
+      { cx: number; cy: number }
+    >;
+    expect(heads).toHaveLength(2);
+
+    // One head sits LEFT of the container, the other RIGHT — neither lands
+    // inside the boundary box along the rank axis.
+    const leftOfContainer = heads.filter((h) => h.cx < container.x);
+    const rightOfContainer = heads.filter((h) => h.cx > container.x + container.w);
+    expect(leftOfContainer).toHaveLength(1);
+    expect(rightOfContainer).toHaveLength(1);
+    for (const h of heads) {
+      // Belt-and-braces: no head's cx is strictly inside the boundary.
+      const insideX = h.cx > container.x && h.cx < container.x + container.w;
+      expect(insideX).toBe(false);
+    }
+
+    // Every use-case ellipse, by contrast, stays INSIDE the boundary.
+    const ellipses = scene.children.filter((s) => s.type === 'ellipse') as Array<
+      { cx: number; cy: number }
+    >;
+    expect(ellipses).toHaveLength(3);
+    for (const e of ellipses) {
+      expect(e.cx).toBeGreaterThan(container.x);
+      expect(e.cx).toBeLessThan(container.x + container.w);
+    }
+  });
+
   it('renders business actors with an extra slash marker on each figure', () => {
     const scene = compile([
       '@startuml',
@@ -700,6 +1057,61 @@ describe('use case layout', () => {
         s.y2 > s.y1,
     );
     expect(diagonals.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('draws the business-actor slash THROUGH each head center, and stacks multi-line actor labels (regression)', () => {
+    // Failing input from the bug report. Asserts both the geometry of the
+    // slash marker (must pass through every head circle's center) and the
+    // multi-line label expansion for `Another\nactor`.
+    const scene = compile([
+      '@startuml',
+      ':First Actor:/',
+      ':Another\\nactor:/ as Man2',
+      'actor/ Woman3',
+      'actor/ :Last actor: as Person1',
+      '@enduml',
+    ].join('\n'));
+
+    const heads = scene.children.filter(
+      (s): s is Extract<typeof s, { type: 'circle' }> => s.type === 'circle',
+    );
+    expect(heads.length).toBe(4);
+
+    // Each business actor's diagonal slash should pass through its head's
+    // (cx, cy). For a line from (x1, y1) to (x2, y2), the distance from a
+    // point (cx, cy) to that line is
+    //   |(x2-x1)*(y1-cy) - (x1-cx)*(y2-y1)| / sqrt(dx^2 + dy^2).
+    // We require this distance < 0.001 (i.e. the line passes through center).
+    const diagonals = scene.children.filter(
+      (s): s is Extract<typeof s, { type: 'line' }> =>
+        s.type === 'line' &&
+        Math.abs(s.x2 - s.x1 - (s.y2 - s.y1)) < 0.001 &&
+        s.x2 > s.x1 &&
+        s.y2 > s.y1,
+    );
+    expect(diagonals.length).toBeGreaterThanOrEqual(4);
+
+    for (const head of heads) {
+      const through = diagonals.some((d) => {
+        const dx = d.x2 - d.x1;
+        const dy = d.y2 - d.y1;
+        const num = Math.abs(dx * (d.y1 - head.cy) - (d.x1 - head.cx) * dy);
+        const denom = Math.sqrt(dx * dx + dy * dy);
+        return denom > 0 && num / denom < 0.001;
+      });
+      expect(through).toBe(true);
+    }
+
+    // Man2's label rendered as TWO separate text shapes (`Another` and
+    // `actor`), since the parser expands `\n` to a real newline.
+    const texts = scene.children.filter(
+      (s): s is Extract<typeof s, { type: 'text' }> => s.type === 'text',
+    );
+    const labels = texts.map((t) => t.text);
+    expect(labels).toContain('Another');
+    expect(labels).toContain('actor');
+    // And NO single text shape with the unsplit literal.
+    expect(labels.some((l) => l.includes('\n'))).toBe(false);
   });
 
   it('renders business use cases with an extra vertical chord on each ellipse', () => {
@@ -783,5 +1195,128 @@ describe('use case layout', () => {
     expect(right.x).toBeGreaterThan(userHead.cx);
     expect(up.y).toBeLessThan(userHead.cy);
     expect(down.y).toBeGreaterThan(userHead.cy);
+  });
+
+  it('renders four arrows with per-relationship #<styleBlock> overrides (color, bold, dashed, dotted, label color)', () => {
+    const scene = compile([
+      '@startuml',
+      'actor foo',
+      'foo --> (bar) : normal',
+      'foo --> (bar1) #line:red;line.bold;text:red : red bold',
+      'foo --> (bar2) #green;line.dashed;text:green : green dashed',
+      'foo --> (bar3) #blue;line.dotted;text:blue : blue dotted',
+      '@enduml',
+    ].join('\n'));
+
+    // All four ellipses must be present (bug: only `bar` rendered).
+    const ellipses = scene.children.filter((s) => s.type === 'ellipse');
+    expect(ellipses).toHaveLength(4);
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    for (const name of ['bar', 'bar1', 'bar2', 'bar3']) {
+      expect(texts).toContain(name);
+    }
+
+    // Edge line shapes — `drawLayeredEdge` emits one `line` or `polyline`
+    // per relationship for the stroke itself. Filter on the per-edge colors
+    // to find each styled arrow.
+    type LineLike = {
+      type: 'line' | 'polyline';
+      style?: { stroke?: string; strokeWidth?: number; strokeDasharray?: string };
+    };
+    const edgeLines = scene.children.filter(
+      (s): s is LineLike & typeof s =>
+        (s.type === 'line' || s.type === 'polyline'),
+    ) as LineLike[];
+
+    // Red bold: stroke red, width >= 2, no dasharray.
+    const redBold = edgeLines.find(
+      (l) => l.style?.stroke === 'red' && (l.style.strokeWidth ?? 0) >= 2,
+    );
+    expect(redBold).toBeDefined();
+    expect(redBold!.style?.strokeDasharray).toBeUndefined();
+
+    // Green dashed: stroke green, dasharray `5,3`.
+    const greenDashed = edgeLines.find(
+      (l) => l.style?.stroke === 'green' && l.style?.strokeDasharray === '5,3',
+    );
+    expect(greenDashed).toBeDefined();
+
+    // Blue dotted: stroke blue, dasharray `2,2`.
+    const blueDotted = edgeLines.find(
+      (l) => l.style?.stroke === 'blue' && l.style?.strokeDasharray === '2,2',
+    );
+    expect(blueDotted).toBeDefined();
+
+    // The label text shapes must use the matching `text:<color>`. Locate by
+    // exact label content.
+    type TextShape = {
+      type: 'text';
+      text: string;
+      font?: { color?: string };
+    };
+    const labelByText = (s: string) =>
+      scene.children.find(
+        (sh): sh is TextShape & typeof sh => sh.type === 'text' && (sh as TextShape).text === s,
+      ) as TextShape | undefined;
+
+    expect(labelByText('red bold')?.font?.color).toBe('red');
+    expect(labelByText('green dashed')?.font?.color).toBe('green');
+    expect(labelByText('blue dotted')?.font?.color).toBe('blue');
+    // The unstyled `normal` label stays at the default colour.
+    expect(labelByText('normal')?.font?.color).toBe('#000');
+  });
+
+  it('renders actor, usecase, and an embedded JSON table when `allowmixing` is set', () => {
+    const scene = compile([
+      '@startuml',
+      'allowmixing',
+      'actor Actor',
+      'usecase Usecase',
+      'json JSON {',
+      '  "fruit":"Apple",',
+      '  "size":"Large",',
+      '  "color": ["Red", "Green"]',
+      '}',
+      '@enduml',
+    ].join('\n'));
+
+    // Actor stick figure contributes at least one circle (the head). The
+    // usecase contributes an ellipse. Both must survive into the scene.
+    const circles = scene.children.filter((s) => s.type === 'circle');
+    expect(circles.length).toBeGreaterThanOrEqual(1);
+    const ellipses = scene.children.filter((s) => s.type === 'ellipse');
+    expect(ellipses.length).toBeGreaterThanOrEqual(1);
+
+    // The embedded JSON block is emitted as a translated <g> group wrapping
+    // the key/value table shapes produced by `layoutKvTree`. Locate it and
+    // assert it contains the expected key/value text cells.
+    const jsonGroup = scene.children.find((s) => s.type === 'group') as
+      | { type: 'group'; children: Array<{ type: string; text?: string }> }
+      | undefined;
+    expect(jsonGroup).toBeDefined();
+    const innerTexts = jsonGroup!.children
+      .filter((c) => c.type === 'text')
+      .map((c) => c.text);
+    expect(innerTexts).toContain('fruit');
+    expect(innerTexts).toContain('"Apple"');
+    expect(innerTexts).toContain('size');
+    expect(innerTexts).toContain('"Large"');
+    expect(innerTexts).toContain('color');
+
+    // Key/value table is rendered with rectangles for each cell — assert at
+    // least a handful are present inside the group (one per key + value).
+    const innerRects = jsonGroup!.children.filter((c) => c.type === 'rect');
+    expect(innerRects.length).toBeGreaterThanOrEqual(4);
+
+    // Top-level actor and usecase labels are still rendered alongside the
+    // JSON block. (They live in the top-level shape list, not inside the
+    // translated group.)
+    const topTexts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    expect(topTexts).toContain('Actor');
+    expect(topTexts).toContain('Usecase');
   });
 });

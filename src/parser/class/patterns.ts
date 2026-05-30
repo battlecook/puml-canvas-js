@@ -2,7 +2,18 @@
 // `$`-prefixed class names (e.g. `class $C1`). Note this is distinct from
 // PlantUML's tag-style attribute (`$tagname` AFTER a class name) — that is
 // handled separately by stripping leading tag tokens before the `class` keyword.
-const CLASS_NAME = String.raw`(?:"([^"]+)"|([A-Za-z_$][\w$.]*(?:<(?:[^<>]|<[^<>]*>)*>)?))`;
+//
+// The bare-name pattern also tolerates `::` between identifier segments so
+// `class X1::X2::foo` (used with `set separator ::`) is captured whole. Other
+// separator tokens (default `.`, or any single-char custom token) are split
+// out of the matched name in code; the matcher just needs to keep them in
+// the same capture group.
+const CLASS_NAME = String.raw`(?:"([^"]+)"|([A-Za-z_$][\w$.]*(?:::[A-Za-z_$][\w$.]*)*(?:<(?:[^<>]|<[^<>]*>)*>)?))`;
+
+// `set separator <token>` — change the namespace separator used to split
+// class names into a package chain + class name. `none` disables auto
+// package creation. Captured group 1 is the raw token.
+export const SET_SEPARATOR = /^set\s+separator\s+(\S+)\s*$/i;
 
 // Optional visibility marker BEFORE the `class` keyword:
 //   -class Foo  (private)

@@ -33,8 +33,18 @@ export const ACTOR_COLON = new RegExp(
   'i',
 );
 
-export const ACTIVATE = new RegExp(String.raw`^activate\s+` + NAME + String.raw`\s*$`, 'i');
+// `activate NAME [#color]` — the optional trailing `#color` fills the
+// activation bar pushed by this directive. Mirrors PlantUML's `activate X #FFBBBB`
+// form. When omitted, the bar uses the default activation fill.
+export const ACTIVATE = new RegExp(
+  String.raw`^activate\s+` + NAME + String.raw`(?:\s+(#\S+))?\s*$`,
+  'i',
+);
 export const DEACTIVATE = new RegExp(String.raw`^deactivate\s+` + NAME + String.raw`\s*$`, 'i');
+// `destroy NAME` — standalone directive (not the `!!` message suffix). Draws a
+// red X marker on NAME's lifeline at the current y and truncates the lifeline
+// below that point. Mirrors PlantUML's standalone `destroy` keyword.
+export const DESTROY = new RegExp(String.raw`^destroy\s+` + NAME + String.raw`\s*$`, 'i');
 
 // `note left|right of NAME` is the explicit form; the shorthand `note left|right`
 // attaches to the previous message's source/target — handled by the parser.
@@ -56,6 +66,19 @@ export const NOTE_OVER_INLINE = new RegExp(
 );
 export const NOTE_OVER_BLOCK = new RegExp(
   String.raw`^` + NOTE_KW + String.raw`\s+over\s+` + NAME + String.raw`(?:\s*,\s*` + NAME + String.raw`)?(?:\s+(#\S+))?\s*$`,
+  'i',
+);
+// `rnote over X <first-line-text>` / `hnote over X <first-line-text>` — PlantUML
+// quirk: the OPENING line of a block-form rnote/hnote may carry the first line
+// of body text after the target name. The rest of the body comes from the
+// lines that follow, terminated by `endrnote` / `endhnote`. Only rnote/hnote
+// support this form (plain `note` does not). Tried AFTER `NOTE_OVER_BLOCK` so
+// the bare (no trailing text) form takes the simpler path.
+//   m[1] = shape keyword (rnote|hnote)
+//   m[2]/m[3] = target name (quoted / bare)
+//   m[4] = first body line (literal text)
+export const NOTE_OVER_BLOCK_FIRST_LINE = new RegExp(
+  String.raw`^(rnote|hnote)\s+over\s+` + NAME + String.raw`\s+(.+?)\s*$`,
   'i',
 );
 // `note across` (and hnote/rnote across) spans the whole diagram. No
@@ -99,6 +122,10 @@ export const GROUP_END = /^end\s*$/i;
 // Group 5: step for set
 // Group 6: format string
 export const NEWPAGE = /^newpage(?:\s+(.+?))?\s*$/i;
+// `ignore newpage` — diagram-level directive that disables `newpage` page
+// breaks entirely. When present, every `newpage` statement is silently dropped
+// by the layout so the diagram renders as a single continuous page.
+export const IGNORE_NEWPAGE = /^ignore\s+newpage\s*$/i;
 
 export const AUTONUMBER = new RegExp(
   String.raw`^autonumber` +

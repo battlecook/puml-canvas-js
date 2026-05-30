@@ -17,6 +17,54 @@ export const BLOCK_CLOSE = /^\}\s*$/;
 // root; layout passes it through the shared Creole markup parser so styles
 // like `//italic//` and `**bold**` render correctly.
 export const FOOTER_INLINE = /^footer\s+(.+?)\s*$/i;
+// `remove <id>` — drops the named node (by id) from the rendered diagram.
+// Mirrors the class-diagram form added in Task #30 so component / deployment /
+// object diagrams support the same statement. Silently ignored when the id
+// was never declared.
+export const REMOVE_STMT = /^remove\s+(\S+)\s*$/i;
+
+// `note <side> of <anchor> : <text>` — single-line attached note. The anchor
+// accepts a bare id, a `"quoted"` form, or the component shorthand `[Name]`
+// (PlantUML treats all three as the same node).
+//   m[1] = side, m[2] = anchor, m[3] = body
+export const NOTE_OF_INLINE =
+  /^note\s+(left|right|top|bottom)\s+of\s+("[^"]+"|\[[^\]]+\]|\S+)\s*:\s*(.*)$/i;
+// `note <side> of <anchor>` (with body on following lines, terminated by
+// `end note`). Same capture indexes as NOTE_OF_INLINE minus the body.
+export const NOTE_OF_BLOCK =
+  /^note\s+(left|right|top|bottom)\s+of\s+("[^"]+"|\[[^\]]+\]|\S+)\s*$/i;
+// Free-standing inline note with an id: `note "Display" as N : body`.
+// Rarely used in practice but accepted for parity with PlantUML. The id is
+// captured at m[3] and the body at m[4]; the optional quoted display label
+// at m[1] (or the bare form at m[2]) becomes the rendered title prefix.
+export const NOTE_AS_INLINE =
+  /^note\s+(?:"([^"]+)"|(\S+))\s+as\s+(\S+)\s*:\s*(.*)$/i;
+// Free-standing block note with an id: `note as N` ... `end note`. The body
+// is collected line-by-line (mirrors NOTE_OF_BLOCK) until the terminator;
+// no anchor is attached so layout treats it as a regular flow node.
+export const NOTE_AS_BLOCK = /^note\s+as\s+(\S+)\s*$/i;
+export const NOTE_END = /^end\s+note\s*$/i;
+
+/**
+ * Strip the wrapping characters off a note anchor reference so the result is
+ * the same id the corresponding node declaration would have produced. PlantUML
+ * allows `note right of C`, `note right of [C]` and `note right of "C"` to
+ * point at the same node, so we collapse all three forms here.
+ */
+export function resolveNoteAnchor(raw: string): string {
+  const t = raw.trim();
+  if (t.startsWith('[') && t.endsWith(']')) return t.slice(1, -1).trim();
+  if (t.startsWith('"') && t.endsWith('"')) return t.slice(1, -1).trim();
+  return t;
+}
+
+/**
+ * Expand `\n` escape sequences in a note body into real newlines so layout
+ * can split on `\n` to produce one rendered line per segment.
+ */
+export function unescapeNoteBody(text: string): string {
+  return text.replace(/\\n/g, '\n');
+}
 
 /**
  * Expand `\n` escape sequences in a quoted display label into real newlines
@@ -191,12 +239,33 @@ export interface DeclResult {
   hasOpenBrace: boolean;
 }
 
+export interface NormalizedEndpoint {
+  name: string;
+  nodeKind?: ContainerNodeKind;
+  /**
+   * `true` when the endpoint token used an explicit declaration form
+   * (e.g. `[Name]` in the component parser). Explicit endpoints created from
+   * a relationship JOIN the active container (Bug C), whereas bare-id
+   * endpoints stay at root and are eligible for the interface auto-promotion
+   * post-pass (Bug B2).
+   */
+  explicit?: boolean;
+}
+
 export interface ContainerParserOptions {
   diagramKind: ContainerAst['kind'];
   defaultNodeKind: ContainerNodeKind;
   tryDecl: (text: string) => DeclResult | null;
-  normalizeEndpoint?: (raw: string) => { name: string; nodeKind?: ContainerNodeKind };
+  normalizeEndpoint?: (raw: string) => NormalizedEndpoint;
   tryAttributeLine?: (text: string, byId: Map<string, ContainerNode>) => boolean;
+  /**
+   * When `true`, after parsing completes, any node that was implicitly
+   * created from a bare-id relationship endpoint (no explicit declaration,
+   * no `[brackets]`) is promoted to `nodeKind: 'interface'`. PlantUML uses
+   * this rule in component diagrams so `[Comp] --> HTTP` renders `HTTP` as
+   * a small lollipop circle when nothing declared it.
+   */
+  autoInterfaceFromBare?: boolean;
 }
 
 export function runContainerParser(source: string, opts: ContainerParserOptions): ContainerAst {
@@ -208,6 +277,28 @@ export function runContainerParser(source: string, opts: ContainerParserOptions)
   };
   const byId = new Map<string, ContainerNode>();
   const parentStack: ContainerNode[] = [];
+  const removedIds = new Set<string>();
+  let noteAnonCounter = 0;
+  // Tracks ids that were created implicitly by a bare-id relationship
+  // endpoint (no `[brackets]`, no explicit declaration). The interface
+  // auto-promotion post-pass converts these to `nodeKind: 'interface'` so
+  // PlantUML's `[Comp] --> HTTP` shorthand renders `HTTP` as a small
+  // lollipop circle when nothing ever declared it.
+  const bareEndpointIds = new Set<string>();
+  // Ids that received an explicit declaration (`component X`, `interface X`,
+  // `[X]`, etc.). Used by the auto-interface post-pass to skip nodes that
+  // were declared, even if they were also referenced by a bare relationship.
+  const explicitlyDeclaredIds = new Set<string>();
+  // Active note block — covers both attached (`note <side> of X` ... `end
+  // note`, populated `anchorId`/`anchorSide`) and free-standing
+  // (`note as N` ... `end note`, populated `freeId`) forms. The discriminator
+  // is `freeId !== undefined`. Mirrors the usecase parser's collection state.
+  let activeNoteBlock: {
+    anchorId?: string;
+    anchorSide?: 'left' | 'right' | 'top' | 'bottom';
+    freeId?: string;
+    bodyLines: string[];
+  } | null = null;
   // Pre-join continuation lines for multi-line bracket labels (`folder X [\n
   // line one\n ---\n line two\n]`) so the per-line declaration matchers see
   // one logical line with `\n`s embedded in the bracket content. Then split
@@ -239,12 +330,99 @@ export function runContainerParser(source: string, opts: ContainerParserOptions)
 
   for (const raw of lines) {
     const text = raw.trim();
+    // When inside an active `note <side> of X` ... `end note` block, every
+    // line (including blank lines) is consumed as body content until the
+    // terminator. Body lines are stored trimmed so leading whitespace from
+    // indented blocks doesn't leak into the rendered note.
+    if (activeNoteBlock) {
+      if (NOTE_END.test(text)) {
+        const body = activeNoteBlock.bodyLines.join('\n');
+        const isFree = activeNoteBlock.freeId !== undefined;
+        const id = isFree
+          ? activeNoteBlock.freeId!
+          : `__container_note_${noteAnonCounter++}`;
+        const note: ContainerNode = {
+          id,
+          name: body,
+          nodeKind: 'note',
+          attributes: [],
+          children: [],
+          text: body,
+        };
+        if (!isFree) {
+          note.anchorId = activeNoteBlock.anchorId!;
+          note.anchorSide = activeNoteBlock.anchorSide!;
+        }
+        addNodeAtRoot(ast, byId, note);
+        if (isFree) explicitlyDeclaredIds.add(id);
+        activeNoteBlock = null;
+      } else {
+        activeNoteBlock.bodyLines.push(text);
+      }
+      continue;
+    }
     if (!text) continue;
     if (LINE_COMMENT.test(text)) continue;
     if (WRAPPER.test(text)) continue;
 
     if (BLOCK_CLOSE.test(text)) {
       parentStack.pop();
+      continue;
+    }
+
+    // Attached-note declarations are checked before the generic decl /
+    // relationship parsers since a `note <side> of X` line would otherwise
+    // fall through to `parseRelationship` and emit a spurious relationship
+    // between `note` and the rest of the line.
+    let noteMatch: RegExpExecArray | null;
+    if ((noteMatch = NOTE_OF_INLINE.exec(text))) {
+      const side = noteMatch[1]!.toLowerCase() as 'left' | 'right' | 'top' | 'bottom';
+      const anchorId = resolveNoteAnchor(noteMatch[2]!);
+      const body = unescapeNoteBody(noteMatch[3]!.trim());
+      const id = `__container_note_${noteAnonCounter++}`;
+      addNodeAtRoot(ast, byId, {
+        id,
+        name: body,
+        nodeKind: 'note',
+        attributes: [],
+        children: [],
+        text: body,
+        anchorId,
+        anchorSide: side,
+      });
+      continue;
+    }
+    if ((noteMatch = NOTE_OF_BLOCK.exec(text))) {
+      const side = noteMatch[1]!.toLowerCase() as 'left' | 'right' | 'top' | 'bottom';
+      const anchorId = resolveNoteAnchor(noteMatch[2]!);
+      activeNoteBlock = { anchorId, anchorSide: side, bodyLines: [] };
+      continue;
+    }
+    // Free-standing inline note with an id: `note "Display" as N : body`.
+    // The optional display label at m[1]/m[2] is currently unused — the
+    // body itself becomes the rendered text. The id is treated as an
+    // explicit declaration so a later dashed link (`C .. N`) connects to
+    // this node instead of conjuring a fresh component.
+    if ((noteMatch = NOTE_AS_INLINE.exec(text))) {
+      const id = noteMatch[3]!;
+      const body = unescapeNoteBody(noteMatch[4]!.trim());
+      addNodeAtRoot(ast, byId, {
+        id,
+        name: body,
+        nodeKind: 'note',
+        attributes: [],
+        children: [],
+        text: body,
+      });
+      explicitlyDeclaredIds.add(id);
+      continue;
+    }
+    // Free-standing block note with an id: `note as N` ... `end note`.
+    // Body lines are collected verbatim until the terminator. The id is
+    // recorded as explicitly declared so relationships (`C .. N`) bind to
+    // this node and the auto-interface post-pass leaves it alone.
+    if ((noteMatch = NOTE_AS_BLOCK.exec(text))) {
+      activeNoteBlock = { freeId: noteMatch[1]!, bodyLines: [] };
       continue;
     }
 
@@ -260,9 +438,20 @@ export function runContainerParser(source: string, opts: ContainerParserOptions)
       continue;
     }
 
+    // `remove <id>` — collect ids to drop in a post-pass. Mirrors the
+    // class-diagram form (Task #30); silently ignored when the id was never
+    // declared. Checked before `tryDecl` so a node literally named `remove`
+    // would still need to be quoted, which matches PlantUML.
+    const rmm = REMOVE_STMT.exec(text);
+    if (rmm) {
+      removedIds.add(rmm[1]!);
+      continue;
+    }
+
     const decl = opts.tryDecl(text);
     if (decl) {
       const stored = addNode(decl.node);
+      explicitlyDeclaredIds.add(stored.id);
       if (decl.hasOpenBrace) parentStack.push(stored);
       continue;
     }
@@ -271,8 +460,10 @@ export function runContainerParser(source: string, opts: ContainerParserOptions)
 
     const rel = parseRelationship(text);
     if (rel) {
-      const left = (opts.normalizeEndpoint?.(rel.source)) ?? { name: rel.source };
-      const right = (opts.normalizeEndpoint?.(rel.target)) ?? { name: rel.target };
+      const left: NormalizedEndpoint =
+        opts.normalizeEndpoint?.(rel.source) ?? { name: rel.source };
+      const right: NormalizedEndpoint =
+        opts.normalizeEndpoint?.(rel.target) ?? { name: rel.target };
 
       const makeNode = (name: string, nodeKind?: ContainerNodeKind): ContainerNode => ({
         id: name,
@@ -282,12 +473,26 @@ export function runContainerParser(source: string, opts: ContainerParserOptions)
         children: [],
       });
 
-      if (!byId.has(left.name)) {
-        addNodeAtRoot(ast, byId, makeNode(left.name, left.nodeKind));
-      }
-      if (!byId.has(right.name)) {
-        addNodeAtRoot(ast, byId, makeNode(right.name, right.nodeKind));
-      }
+      // Explicit endpoints (e.g. `[Name]` form) are treated as declarations
+      // and join the active container (Bug C). Bare-id endpoints stay at
+      // root and are recorded for the auto-interface post-pass (Bug B2).
+      const placeEndpoint = (ep: NormalizedEndpoint): void => {
+        if (byId.has(ep.name)) {
+          if (ep.explicit) explicitlyDeclaredIds.add(ep.name);
+          return;
+        }
+        const node = makeNode(ep.name, ep.nodeKind);
+        if (ep.explicit) {
+          addNode(node);
+          explicitlyDeclaredIds.add(ep.name);
+        } else {
+          addNodeAtRoot(ast, byId, node);
+          bareEndpointIds.add(ep.name);
+        }
+      };
+
+      placeEndpoint(left);
+      placeEndpoint(right);
       const cRel: ContainerRelationship = {
         source: left.name,
         target: right.name,
@@ -299,6 +504,43 @@ export function runContainerParser(source: string, opts: ContainerParserOptions)
       };
       ast.relationships.push(cRel);
     }
+  }
+
+  // Auto-interface promotion (Bug B2): in component diagrams, a relationship
+  // endpoint that was never declared and never written in bracket form is
+  // rendered as an interface (small lollipop circle). Restricted to the
+  // component diagram via the `autoInterfaceFromBare` flag because deployment
+  // and object diagrams don't have an interface visual.
+  if (opts.autoInterfaceFromBare) {
+    for (const id of bareEndpointIds) {
+      if (explicitlyDeclaredIds.has(id)) continue;
+      const node = byId.get(id);
+      if (!node) continue;
+      // Only promote when the node still carries the parser's default kind —
+      // a normalizeEndpoint that already chose a specific kind wins.
+      if (node.nodeKind === opts.defaultNodeKind) {
+        node.nodeKind = 'interface';
+      }
+    }
+  }
+
+  // Apply `remove <id>` statements: walk the node tree dropping any node
+  // (root or nested) whose id is in `removedIds`, then drop relationships
+  // that reference a removed endpoint. Unknown ids are silently ignored.
+  if (removedIds.size > 0) {
+    const filterNodes = (nodes: ContainerNode[]): ContainerNode[] => {
+      const kept: ContainerNode[] = [];
+      for (const n of nodes) {
+        if (removedIds.has(n.id)) continue;
+        if (n.children.length > 0) n.children = filterNodes(n.children);
+        kept.push(n);
+      }
+      return kept;
+    };
+    ast.nodes = filterNodes(ast.nodes);
+    ast.relationships = ast.relationships.filter(
+      (r) => !removedIds.has(r.source) && !removedIds.has(r.target),
+    );
   }
 
   return ast;
@@ -397,6 +639,35 @@ function normalizeStyleColor(raw: string): string {
     return `#${trimmed}`;
   }
   return trimmed.toLowerCase();
+}
+
+/**
+ * Archimate layer-color lookup. PlantUML's archimate diagrams tag each element
+ * with a layer hint (`#Business`, `#Application`, `#Technology`, …) that
+ * conventionally selects a layer-appropriate pastel fill. The table maps the
+ * layer name (case-insensitive) to a CSS color string the renderer accepts.
+ * Used by the `archimate` declaration in the component parser; layers not in
+ * the table fall through as-is so users can still pass a literal color
+ * (`#Yellow`, `#FFAA00`).
+ */
+export const ARCHIMATE_LAYER_COLORS: Record<string, string> = {
+  business:       '#FFFFB5',
+  application:    '#B5FFFF',
+  technology:     '#C9E7B7',
+  motivation:     '#E7B7E7',
+  strategy:       '#FFD9B5',
+  implementation: '#FFB5C5',
+  physical:       '#C9E7B7',
+};
+
+/**
+ * Resolve a layer hint token (with or without leading `#`) to its conventional
+ * pastel fill. Returns `null` when the token is not a known layer name so the
+ * caller can fall back to treating it as a literal color.
+ */
+export function resolveArchimateLayer(raw: string): string | null {
+  const trimmed = raw.startsWith('#') ? raw.slice(1) : raw;
+  return ARCHIMATE_LAYER_COLORS[trimmed.toLowerCase()] ?? null;
 }
 
 /**

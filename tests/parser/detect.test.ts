@@ -19,6 +19,7 @@ describe('detectKind', () => {
     expect(detect('@startyaml\na: 1\n@endyaml')).toBe('yaml');
     expect(detect('@startwbs\n* root\n@endwbs')).toBe('wbs');
     expect(detect('@startsalt\n{...}\n@endsalt')).toBe('salt');
+    expect(detect('@startnwdiag\nnetwork dmz {}\n@endnwdiag')).toBe('nwdiag');
   });
 
   it('detects sequence from participant keyword', () => {

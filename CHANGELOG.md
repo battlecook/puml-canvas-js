@@ -8,6 +8,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The project is pre-1.0. While the public API is stable across patch releases,
 > minor releases (0.X.0) may introduce breaking changes until 1.0.0.
 
+## [0.7.0] - 2026-05-30
+
+### Added
+
+- **Salt wireframe diagrams.** Added first-class `@startsalt` parsing and
+  layout for compact UI mockups, including text rows, buttons, radio buttons,
+  checkboxes, text fields, and droplists. The previous Salt placeholder golden
+  has been replaced with real parser, layout, and golden coverage.
+- **Nwdiag network diagrams.** Added first-class `@startnwdiag` support for
+  named and anonymous networks, network address labels, member nodes with
+  addresses, top-level nodes, cloud-shaped nodes, and top-level links.
+- **Archimate macro pre-processing.** Common `<archimate/Archimate>` element
+  and relationship macros are expanded into supported PlantUML declarations,
+  while unsupported preprocessor directives, sprites, legends, listsprite
+  blocks, and scoped skinparam noise are stripped or surfaced as placeholders.
+- **Timing diagram expansion.** Timing diagrams now cover named time anchors
+  and offsets, track-scoped events, `scale ... as ... pixels`, date and clock
+  stamps, `use date format`, hidden/manual time-axis directives, state notes,
+  hidden states, inter-track measurements, and analog tracks with optional
+  y-ranges.
+- **Gantt scheduling expansion.** Gantt diagrams now parse and render relative
+  day offsets, aliases, dependencies, weekly print scales, calendar week
+  labels, milestones, working-day scheduling with closed dates/weekdays,
+  same-row tasks, bottom notes, colored/named ranges, today markers, and
+  additional natural-language task timing forms.
+- **Sequence compatibility refinements.** Sequence diagrams now support
+  activation colors, standalone destroy markers, `ignore newpage`,
+  `hide footbox`, `group ... [secondary]`, first-line `hnote`/`rnote` blocks,
+  note alignment with `/`, PlantUML-style delays and dividers, and
+  `actorStyle` variants such as awesome and hollow.
+- **Class namespace support.** Class diagrams now honor `set separator`,
+  automatically materialize nested package frames for namespaced class names,
+  preserve quoted class names literally, and support `set separator none`.
+- **SVG image primitives.** The scene model and SVG renderer now include an
+  image shape with both `href` and `xlink:href` output for broader SVG
+  consumer compatibility.
+
+### Changed
+
+- **Sequence layout behavior is closer to PlantUML.** Bare delays no longer
+  draw a full horizontal line, long delays avoid crossing participant lanes,
+  dividers render as double parallel lines, note spacing expands for outer and
+  side-by-side notes, and destroyed lifelines keep their bottom headers while
+  truncating correctly.
+- **Demo samples keep pace with supported syntax.** Archimate and timing
+  samples were expanded, and the demo entry point/sample modules were updated
+  to exercise the new parser and layout surfaces.
+
+### Fixed
+
+- **Sequence rendering edge cases.** Autonumber labels now recover from
+  unclosed font/bold tags, standalone destroy markers render a red cross at
+  the correct point, activation colors are carried into bars, and divider,
+  delay, note, and lifeline bounds avoid unintended overlaps.
+- **Gantt calendar and dependency edge cases.** Weekly axes, negative week
+  ranges, closed-date bands, working-day offsets, dependency arrows,
+  milestones, same-row tasks, today markers, and colored ranges are covered by
+  focused parser/layout tests.
+- **Timing label and geometry edge cases.** Date-domain labels, hidden axes,
+  inline notes, omitted hidden states, measurement lines, analog graphs, and
+  y-range labels now have dedicated layout coverage.
+
+### Tests
+
+- Added parser, layout, and golden coverage for Salt, Nwdiag, Archimate
+  pre-processing, timing, Gantt, sequence refinements, class namespaces, SVG
+  image rendering, detector behavior, and demo-backed samples.
+
 ## [0.6.0] - 2026-05-29
 
 ### Added

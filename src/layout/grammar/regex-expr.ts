@@ -83,6 +83,23 @@ function parseAtom(s: State): RegexExpr {
     if (next === 'B') return { type: 'anchor', kind: 'nonwordboundary' };
     if ('sdwSDW'.includes(next)) return { type: 'charclass', raw: '\\' + next };
     if (next === 'n' || next === 'r' || next === 't') return { type: 'charclass', raw: '\\' + next };
+    if ((next === 'p' || next === 'P') && peek(s) === '{') {
+      // Unicode property escape: \p{Name} / \P{Name}. Name allows letters and underscore
+      // (e.g. \p{L}, \p{Letter}, \p{Lowercase_letter}). Optional value form \p{Name=Value}
+      // is also accepted.
+      const save = s.i;
+      s.i++; // consume '{'
+      let name = '';
+      while (s.i < s.input.length && /[A-Za-z_=]/.test(peek(s))) {
+        name += consume(s);
+      }
+      if (name.length > 0 && peek(s) === '}') {
+        s.i++; // consume '}'
+        return { type: 'charclass', raw: '\\' + next + '{' + name + '}' };
+      }
+      // Malformed — rewind and fall through to literal handling of `next`.
+      s.i = save;
+    }
     if (next === 'Q') {
       // Literal sequence: \Q...\E matches enclosed text literally.
       // Unterminated \Q runs to end of input (PCRE/Java semantics).

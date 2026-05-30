@@ -15,7 +15,8 @@ export type DiagramKind =
   | 'wbs'
   | 'ebnf'
   | 'regex'
-  | 'timing';
+  | 'timing'
+  | 'nwdiag';
 
 export interface UnknownAst {
   kind: 'unknown';
@@ -44,7 +45,9 @@ export type DiagramAst =
   | import('./yaml.js').YamlAst
   | import('./grammar.js').EbnfAst
   | import('./grammar.js').RegexAst
-  | import('./timing.js').TimingAst;
+  | import('./timing.js').TimingAst
+  | import('./nwdiag.js').NwdiagAst
+  | import('./salt.js').SaltAst;
 
 export type {
   ParticipantShape,
@@ -136,6 +139,9 @@ export type {
   WeekdayName,
   GanttTask,
   GanttAst,
+  GanttDependency,
+  GanttPrintScale,
+  GanttResourceAssignment,
 } from './gantt.js';
 
 export type { JsonAst } from './json.js';
@@ -150,3 +156,11 @@ export type {
 } from './timing.js';
 
 export type { EbnfRule, EbnfAst, RegexAst } from './grammar.js';
+
+export type {
+  NwdiagNode,
+  NwdiagNetwork,
+  NwdiagAst,
+} from './nwdiag.js';
+
+export type { SaltWidget, SaltAst } from './salt.js';

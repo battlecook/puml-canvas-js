@@ -36,17 +36,29 @@ describe('detectUnsupportedDirectives', () => {
     expect(detectUnsupportedDirectives(src)).toEqual(['!procedure', '!if']);
   });
 
-  it('detects !pragma, !include, !define, !function', () => {
+  it('detects !include, !define, !function', () => {
     const src = [
-      '!pragma layout smetana',
       '!include foo.puml',
       '!define X 1',
       '!function f() return 1',
       '!endfunction',
     ].join('\n');
     expect(detectUnsupportedDirectives(src)).toEqual([
-      '!pragma', '!include', '!define', '!function',
+      '!include', '!define', '!function',
     ]);
+  });
+
+  it('detects !pragma directives', () => {
+    expect(detectUnsupportedDirectives('!pragma teoz true')).toEqual(['!pragma']);
+    expect(detectUnsupportedDirectives('!pragma layout smetana')).toEqual(['!pragma']);
+    const mixed = [
+      '@startuml',
+      '!pragma teoz true',
+      '!include foo.puml',
+      'A -> B',
+      '@enduml',
+    ].join('\n');
+    expect(detectUnsupportedDirectives(mixed)).toEqual(['!include', '!pragma']);
   });
 
   it('ignores commented-out and inline ! occurrences', () => {

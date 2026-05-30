@@ -91,6 +91,28 @@ describe('parseLabelMarkup — PlantUML extensions', () => {
     const joined = spans.map((s) => s.text).join('');
     expect(joined).toContain('__not underlined__');
   });
+
+  it('renders `<<text>>` as `«text»` in an italic span (PlantUML stereotype)', () => {
+    const spans = parseLabelMarkup('<< createRequest >>');
+    const guillemetSpan = spans.find((s) => s.text.includes('«'));
+    expect(guillemetSpan).toBeDefined();
+    expect(guillemetSpan!.text).toBe('«createRequest»');
+    expect(guillemetSpan!.italic).toBe(true);
+    // The opening `<<` MUST NOT have been swallowed as an HTML tag opener,
+    // which would have left the visible text as `<>`.
+    const joined = spans.map((s) => s.text).join('');
+    expect(joined).not.toBe('<>');
+    expect(joined).not.toContain('<<');
+  });
+
+  it('renders `<<text>>` mixed with surrounding plain text', () => {
+    const spans = parseLabelMarkup('A -> B: << createRequest >> tail');
+    const joined = spans.map((s) => s.text).join('');
+    expect(joined).toContain('«createRequest»');
+    expect(joined).toContain('tail');
+    expect(joined).not.toContain('<<');
+    expect(joined).not.toContain('>>');
+  });
 });
 
 describe('drawLabelSpans — extended styling', () => {
@@ -189,10 +211,37 @@ describe('activity layout — full extended-markup repro', () => {
     expect(joined).toContain('\u{1F4C5}');
   });
 
-  it('renders <img:url> as a literal [img] placeholder', () => {
+  it('renders <img:url> as an inline image shape carrying the URL', () => {
     const scene = compile(SRC);
+    const images = scene.children.filter((s) => s.type === 'image') as Array<{
+      href: string; w: number; h: number;
+    }>;
+    expect(images.some((img) => img.href === 'https://plantuml.com/logo3.png')).toBe(true);
+    // The literal `[img]` placeholder text should NOT be in the scene anymore.
     const texts = scene.children.filter((s) => s.type === 'text') as Array<{ text: string }>;
     const joined = texts.map((t) => t.text).join('');
-    expect(joined).toContain('[img]');
+    expect(joined).not.toContain('[img]');
+  });
+});
+
+describe('sequence note — inline <img:url>', () => {
+  it('emits an image shape with the URL when a note contains <img:url>', () => {
+    const src = [
+      '@startuml',
+      'Alice -> Bob: hi',
+      'note over Bob',
+      '  see <img:https://example.com/pic.png> please',
+      'end note',
+      '@enduml',
+    ].join('\n');
+    const scene = compile(src);
+    const images = scene.children.filter((s) => s.type === 'image') as Array<{
+      href: string; w: number; h: number;
+    }>;
+    expect(images.length).toBeGreaterThan(0);
+    const match = images.find((img) => img.href === 'https://example.com/pic.png');
+    expect(match).toBeDefined();
+    expect(match!.w).toBeGreaterThan(0);
+    expect(match!.h).toBeGreaterThan(0);
   });
 });
