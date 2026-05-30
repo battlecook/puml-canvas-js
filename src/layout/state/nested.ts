@@ -8,6 +8,14 @@ import type { Scene, Shape, Style } from '../../scene/types.js';
 import { measureText } from '../sequence/measure.js';
 import { assignLayers, buildLayoutEdges, removeCycles } from '../class/sugiyama.js';
 import { drawMarker, markerLength, shortenPolyline, type Vec } from '../class/markers.js';
+import {
+  sdlOutlineShape,
+  pseudoStateShape,
+  PSEUDO_FORK_W,
+  PSEUDO_FORK_H,
+  PSEUDO_START_R,
+  PSEUDO_END_R,
+} from './shapes.js';
 
 const PAGE_PAD = 16;
 const TITLE_FONT = 16;
@@ -22,12 +30,14 @@ const NORMAL_PAD_X = 14;
 const NORMAL_PAD_Y = 8;
 const NORMAL_MIN_W = 70;
 const NORMAL_MIN_H = 30;
-const INITIAL_SIZE = 16;
-const FINAL_SIZE = 18;
+const DIVIDER_GAP = 8;
+const DESC_ROW_GAP = 2;
+const INITIAL_SIZE = PSEUDO_START_R * 2;
+const FINAL_SIZE = PSEUDO_END_R * 2;
 const CHOICE_SIZE = 28;
-const FORK_W = 60;
-const FORK_H = 8;
-const HISTORY_SIZE = 22;
+const FORK_W = PSEUDO_FORK_W;
+const FORK_H = PSEUDO_FORK_H;
+const HISTORY_SIZE = 20;
 
 const FONT_FAMILY = 'sans-serif';
 const FONT_LABEL = 12;
@@ -37,7 +47,6 @@ const COMPOSITE_NAME_FONT = 13;
 const COLOR_LINE = '#222';
 const COLOR_EDGE = '#444';
 const COLOR_NORMAL_FILL = '#fefece';
-const COLOR_PSEUDO = '#222';
 const COLOR_CHOICE_FILL = '#fefece';
 const COLOR_COMPOSITE_FILL = 'rgba(254, 252, 206, 0.4)';
 const COLOR_COMPOSITE_STROKE = '#888';
@@ -58,7 +67,14 @@ interface Box {
 export function layoutStateNested(ast: StateAst): Scene {
   const titleHeight = ast.title ? TITLE_FONT + TITLE_GAP : 0;
   const topBoxes = ast.states.map((n) => layoutStateNode(n, ast.transitions));
-  const rows = packIntoRows(topBoxes, MAX_ROW_W);
+  // Default to PlantUML's top-to-bottom flow: sibling top-level composite
+  // states stack vertically (one box per row). Only when the source opts
+  // into `left to right direction` do we revert to the horizontal
+  // row-packing behaviour. Children inside a composite always flow
+  // horizontally regardless of this setting.
+  const rows = ast.direction === 'LR'
+    ? packIntoRows(topBoxes, MAX_ROW_W)
+    : topBoxes.map((b) => [b]);
 
   let cursorY = PAGE_PAD + titleHeight;
   let maxRowW = 0;
@@ -103,8 +119,10 @@ export function layoutStateNested(ast: StateAst): Scene {
     }
   }
 
+  const transitionGroups = groupParallelTransitions(ast.transitions);
   for (const t of ast.transitions) {
-    shapes.push(...drawTransitionEdge(t, positions));
+    const meta = transitionGroups.get(t)!;
+    shapes.push(...drawTransitionEdge(t, positions, meta.index, meta.count));
   }
 
   return {
@@ -124,9 +142,24 @@ function layoutStateNode(node: StateNode, allTrans: StateTransition[]): Box {
   const childIds = new Set(node.children.map((c) => c.id));
   const intra = allTrans.filter((t) => childIds.has(t.source) && childIds.has(t.target));
 
-  const arrangement = intra.length > 0
-    ? sugiyamaArrange(node.children, childBoxes, intra)
-    : rowWrapArrange(childBoxes);
+  // Concurrent regions: `state X { ... -- ... }` (or `||`) splits the
+  // composite into orthogonal regions. `--` stacks them vertically (rows
+  // separated by a horizontal dashed line); `||` stacks them horizontally
+  // (columns separated by a vertical dashed line). Each region is laid out
+  // independently using the same single-region strategy (sugiyama if it
+  // has intra-region transitions, otherwise the simple row-wrap pack).
+  const regions = node.regions;
+  const arrangement = regions && regions.length > 1
+    ? regionsArrange(
+        node.children,
+        childBoxes,
+        intra,
+        regions,
+        node.regionDirection ?? 'vertical',
+      )
+    : intra.length > 0
+      ? sugiyamaArrange(node.children, childBoxes, intra)
+      : rowWrapArrange(childBoxes);
 
   const headerText = node.name || node.id;
   const headerW = measureText(headerText, COMPOSITE_NAME_FONT).width + 28;
@@ -139,6 +172,10 @@ function layoutStateNode(node: StateNode, allTrans: StateTransition[]): Box {
     h,
     draw(x, y, posMap) {
       const shapes: Shape[] = [];
+      // Composite states need a position entry so transitions whose
+      // endpoint is a composite (rather than a leaf) can find a box to
+      // clip against and a center for label placement.
+      posMap.set(node.id, { x, y, w, h });
       shapes.push({
         type: 'rect',
         x, y, w, h,
@@ -207,6 +244,151 @@ function rowWrapArrange(childBoxes: Box[]): Arrangement {
         for (const child of row) {
           out.push(...child.draw(cx, originY + meta.yOffset, posMap));
           cx += child.w + CHILD_GAP;
+        }
+      }
+    },
+  };
+}
+
+// Space reserved for the dashed line that separates concurrent regions
+// inside a composite (perpendicular to the stacking axis).
+const REGION_SEPARATOR_GAP = 14;
+
+function regionsArrange(
+  childNodes: StateNode[],
+  childBoxes: Box[],
+  intra: StateTransition[],
+  regions: string[][],
+  direction: 'vertical' | 'horizontal',
+): Arrangement {
+  // Build per-region arrangements. Each region gets a subset of children
+  // (in source order) plus the subset of intra-composite transitions whose
+  // BOTH endpoints sit inside the same region — cross-region transitions
+  // are intentionally not laid out inside any region.
+  const idToBox = new Map(childNodes.map((n, i) => [n.id, childBoxes[i]!]));
+  const idToNode = new Map(childNodes.map((n) => [n.id, n]));
+
+  // Any child not enumerated in `regions` (shouldn't happen in well-formed
+  // input, but be defensive) is collected into a trailing region so it
+  // still renders.
+  const enumerated = new Set<string>();
+  for (const r of regions) for (const id of r) enumerated.add(id);
+  const leftovers: string[] = [];
+  for (const n of childNodes) if (!enumerated.has(n.id)) leftovers.push(n.id);
+
+  const effectiveRegions = leftovers.length > 0 ? [...regions, leftovers] : regions;
+
+  const regionArrangements: Arrangement[] = [];
+  for (const regionIds of effectiveRegions) {
+    const regionSet = new Set(regionIds);
+    const regionNodes: StateNode[] = [];
+    const regionBoxes: Box[] = [];
+    for (const id of regionIds) {
+      const n = idToNode.get(id);
+      const b = idToBox.get(id);
+      if (n && b) {
+        regionNodes.push(n);
+        regionBoxes.push(b);
+      }
+    }
+    const regionIntra = intra.filter(
+      (t) => regionSet.has(t.source) && regionSet.has(t.target),
+    );
+    const arr = regionIntra.length > 0
+      ? sugiyamaArrange(regionNodes, regionBoxes, regionIntra)
+      : rowWrapArrange(regionBoxes);
+    regionArrangements.push(arr);
+  }
+
+  if (direction === 'horizontal') {
+    // Stack regions side-by-side. innerH is the tallest region; innerW
+    // sums region widths plus separators between them.
+    let innerW = 0;
+    let innerH = 0;
+    for (let i = 0; i < regionArrangements.length; i++) {
+      const a = regionArrangements[i]!;
+      innerH = Math.max(innerH, a.innerH);
+      innerW += a.innerW;
+      if (i < regionArrangements.length - 1) innerW += REGION_SEPARATOR_GAP;
+    }
+
+    return {
+      innerW,
+      innerH,
+      place(originX, originY, contentW, posMap, out) {
+        // Distribute any extra horizontal slack evenly across the regions
+        // so the column-stack spans the composite's full content width.
+        // (Without this, narrow regions would crowd against one edge.)
+        const slack = Math.max(0, contentW - innerW);
+        const extraPer = regionArrangements.length > 0
+          ? slack / regionArrangements.length
+          : 0;
+        let cx = originX;
+        for (let i = 0; i < regionArrangements.length; i++) {
+          const a = regionArrangements[i]!;
+          const w = a.innerW + extraPer;
+          a.place(cx, originY, w, posMap, out);
+          cx += w;
+          // Dashed vertical separator line between this region and the
+          // next, spanning the full content height.
+          if (i < regionArrangements.length - 1) {
+            const sepX = cx + REGION_SEPARATOR_GAP / 2;
+            out.push({
+              type: 'line',
+              x1: sepX,
+              y1: originY,
+              x2: sepX,
+              y2: originY + innerH,
+              style: {
+                stroke: COLOR_COMPOSITE_STROKE,
+                strokeWidth: 1,
+                strokeDasharray: '5,3',
+              },
+            });
+            cx += REGION_SEPARATOR_GAP;
+          }
+        }
+      },
+    };
+  }
+
+  // Vertical stacking (default, from `--`). innerW is the widest region;
+  // innerH sums region heights plus separators between them.
+  let innerW = 0;
+  let innerH = 0;
+  const yOffsets: number[] = [];
+  for (let i = 0; i < regionArrangements.length; i++) {
+    const a = regionArrangements[i]!;
+    innerW = Math.max(innerW, a.innerW);
+    yOffsets.push(innerH);
+    innerH += a.innerH;
+    if (i < regionArrangements.length - 1) innerH += REGION_SEPARATOR_GAP;
+  }
+
+  return {
+    innerW,
+    innerH,
+    place(originX, originY, contentW, posMap, out) {
+      for (let i = 0; i < regionArrangements.length; i++) {
+        const a = regionArrangements[i]!;
+        const yOff = yOffsets[i]!;
+        a.place(originX, originY + yOff, contentW, posMap, out);
+        // Dashed horizontal separator line between this region and the
+        // next.
+        if (i < regionArrangements.length - 1) {
+          const sepY = originY + yOff + a.innerH + REGION_SEPARATOR_GAP / 2;
+          out.push({
+            type: 'line',
+            x1: originX,
+            y1: sepY,
+            x2: originX + contentW,
+            y2: sepY,
+            style: {
+              stroke: COLOR_COMPOSITE_STROKE,
+              strokeWidth: 1,
+              strokeDasharray: '5,3',
+            },
+          });
         }
       }
     },
@@ -306,10 +488,15 @@ function measureLeaf(node: StateNode): { w: number; h: number } {
       const nameM = measureText(text, FONT_LABEL);
       let w = nameM.width;
       let h = nameM.height;
-      if (node.description) {
-        const descM = measureText(node.description, FONT_LABEL);
-        w = Math.max(w, descM.width);
-        h += descM.height + 4;
+      const descs = node.descriptions ?? [];
+      if (descs.length > 0) {
+        h += DIVIDER_GAP;
+        for (let i = 0; i < descs.length; i++) {
+          const descM = measureText(descs[i]!, FONT_LABEL);
+          w = Math.max(w, descM.width);
+          h += descM.height;
+          if (i < descs.length - 1) h += DESC_ROW_GAP;
+        }
       }
       return {
         w: Math.max(NORMAL_MIN_W, w + NORMAL_PAD_X * 2),
@@ -330,18 +517,13 @@ function leafRectStyle(node: StateNode, baseFill: string, baseStroke: string): S
 function drawLeaf(node: StateNode, x: number, y: number, w: number, h: number): Shape[] {
   const cx = x + w / 2;
   const cy = y + h / 2;
+  // Pseudo-state shapes (initial/final/fork/join) live in shapes.ts so the
+  // flat and nested state layouts stay visually identical. Labels are not
+  // emitted for these — fork/join bars and initial/final dots are unlabeled
+  // by convention.
+  const pseudo = pseudoStateShape(node, x, y, w, h);
+  if (pseudo) return pseudo;
   switch (node.stateKind) {
-    case 'initial':
-      return [{
-        type: 'circle',
-        cx, cy, r: w / 2,
-        style: { fill: COLOR_PSEUDO, stroke: COLOR_PSEUDO, strokeWidth: 1 },
-      }];
-    case 'final':
-      return [
-        { type: 'circle', cx, cy, r: w / 2, style: { fill: '#fff', stroke: COLOR_PSEUDO, strokeWidth: 1.2 } },
-        { type: 'circle', cx, cy, r: w / 2 - 4, style: { fill: COLOR_PSEUDO, stroke: COLOR_PSEUDO, strokeWidth: 1 } },
-      ];
     case 'choice': {
       const r = w / 2;
       return [{
@@ -350,20 +532,13 @@ function drawLeaf(node: StateNode, x: number, y: number, w: number, h: number): 
         style: { fill: COLOR_CHOICE_FILL, stroke: COLOR_LINE, strokeWidth: 1 },
       }];
     }
-    case 'fork':
-    case 'join':
-      return [{
-        type: 'rect',
-        x, y, w, h,
-        style: { fill: COLOR_PSEUDO, stroke: COLOR_PSEUDO, strokeWidth: 1 },
-      }];
     case 'history':
       return [
         { type: 'circle', cx, cy, r: w / 2, style: { fill: '#fff', stroke: COLOR_LINE, strokeWidth: 1 } },
         {
           type: 'text',
           x: cx, y: cy,
-          text: 'H',
+          text: node.isDeep ? 'H*' : 'H',
           anchor: 'middle', baseline: 'middle',
           font: { family: FONT_FAMILY, size: FONT_LABEL, weight: 'bold', color: '#000' },
         },
@@ -371,19 +546,22 @@ function drawLeaf(node: StateNode, x: number, y: number, w: number, h: number): 
     case 'normal':
     default: {
       const textColor = node.textColor ?? '#000';
+      const strokeColor = node.lineColor ?? COLOR_LINE;
+      const baseStyle = leafRectStyle(node, COLOR_NORMAL_FILL, COLOR_LINE);
       const shapes: Shape[] = [
-        {
+        sdlOutlineShape(node, x, y, w, h, baseStyle) ?? {
           type: 'rect',
           x, y, w, h,
           rx: 8, ry: 8,
-          style: leafRectStyle(node, COLOR_NORMAL_FILL, COLOR_LINE),
+          style: baseStyle,
         },
       ];
       const labelText = node.name || node.id;
-      if (node.description) {
+      const descs = node.descriptions ?? [];
+      if (descs.length > 0) {
         const lh = measureText(labelText, FONT_LABEL).height;
         const nameY = y + NORMAL_PAD_Y + lh / 2;
-        const descY = nameY + lh / 2 + 4 + measureText(node.description, FONT_LABEL).height / 2;
+        const dividerY = nameY + lh / 2 + DIVIDER_GAP / 2;
         shapes.push({
           type: 'text',
           x: cx, y: nameY,
@@ -392,12 +570,23 @@ function drawLeaf(node: StateNode, x: number, y: number, w: number, h: number): 
           font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
         });
         shapes.push({
-          type: 'text',
-          x: cx, y: descY,
-          text: node.description,
-          anchor: 'middle', baseline: 'middle',
-          font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+          type: 'line',
+          x1: x, y1: dividerY,
+          x2: x + w, y2: dividerY,
+          style: { stroke: strokeColor, strokeWidth: 1 },
         });
+        let rowTop = dividerY + DIVIDER_GAP / 2;
+        for (const desc of descs) {
+          const dh = measureText(desc, FONT_LABEL).height;
+          shapes.push({
+            type: 'text',
+            x: cx, y: rowTop + dh / 2,
+            text: desc,
+            anchor: 'middle', baseline: 'middle',
+            font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+          });
+          rowTop += dh + DESC_ROW_GAP;
+        }
       } else {
         shapes.push({
           type: 'text',
@@ -431,7 +620,44 @@ function packIntoRows<T extends { w: number; h: number }>(items: T[], maxW: numb
   return rows;
 }
 
-function drawTransitionEdge(t: StateTransition, positions: Map<string, AbsPos>): Shape[] {
+// Spacing between labels of transitions that connect the same pair of nodes.
+// The perpendicular component spreads labels sideways from the arrow; the
+// tangential component staggers them along the arrow. Both are needed so
+// that wide labels don't overlap on near-vertical or near-horizontal edges.
+const PARALLEL_EDGE_PERP_OFFSET = 18;
+const PARALLEL_EDGE_TANGENT_OFFSET = 16;
+
+function groupParallelTransitions(
+  transitions: StateTransition[],
+): Map<StateTransition, { index: number; count: number }> {
+  // Group by unordered node pair so that A->B and B->A share an offset slot.
+  const groups = new Map<string, StateTransition[]>();
+  for (const t of transitions) {
+    const a = t.source;
+    const b = t.target;
+    const key = a < b ? `${a} ${b}` : `${b} ${a}`;
+    let bucket = groups.get(key);
+    if (!bucket) {
+      bucket = [];
+      groups.set(key, bucket);
+    }
+    bucket.push(t);
+  }
+  const meta = new Map<StateTransition, { index: number; count: number }>();
+  for (const bucket of groups.values()) {
+    for (let i = 0; i < bucket.length; i++) {
+      meta.set(bucket[i]!, { index: i, count: bucket.length });
+    }
+  }
+  return meta;
+}
+
+function drawTransitionEdge(
+  t: StateTransition,
+  positions: Map<string, AbsPos>,
+  groupIndex: number,
+  groupCount: number,
+): Shape[] {
   const src = positions.get(t.source);
   const tgt = positions.get(t.target);
   if (!src || !tgt) return [];
@@ -469,15 +695,68 @@ function drawTransitionEdge(t: StateTransition, positions: Map<string, AbsPos>):
   if (tgtMarker) shapes.push(tgtMarker);
 
   if (t.label) {
-    shapes.push({
-      type: 'text',
-      x: (start.x + end.x) / 2,
-      y: (start.y + end.y) / 2 - 4,
-      text: t.label,
-      anchor: 'middle',
-      baseline: 'alphabetic',
-      font: { family: FONT_FAMILY, size: EDGE_LABEL_FONT, color: '#000' },
-    });
+    // For groups of parallel transitions (same unordered node pair), spread
+    // labels perpendicular to the arrow so they don't overlap. The arrow path
+    // itself is left untouched — only the label position shifts.
+    //
+    // Use a perpendicular axis that does NOT depend on transition direction:
+    // otherwise a forward edge (A→B) and a backward edge (B→A) compute
+    // opposite perpendiculars, which collapses their offset slots onto the
+    // same point. Anchor the perpendicular on the unordered (source, target)
+    // pair so all transitions in a group share the same offset axis.
+    const ax = t.source < t.target ? t.source : t.target;
+    const bx = t.source < t.target ? t.target : t.source;
+    const aPos = positions.get(ax)!;
+    const bPos = positions.get(bx)!;
+    const aCx = aPos.x + aPos.w / 2;
+    const aCy = aPos.y + aPos.h / 2;
+    const bCx = bPos.x + bPos.w / 2;
+    const bCy = bPos.y + bPos.h / 2;
+    const ddx = bCx - aCx;
+    const ddy = bCy - aCy;
+    const len = Math.hypot(ddx, ddy) || 1;
+    // Tangent unit vector (along the unordered axis).
+    const tx = ddx / len;
+    const ty = ddy / len;
+    // Perpendicular unit vector (rotate tangent by -90°).
+    const px = ty;
+    const py = -tx;
+    const slot = groupCount > 1 ? groupIndex - (groupCount - 1) / 2 : 0;
+    const perpOff = slot * PARALLEL_EDGE_PERP_OFFSET;
+    const tanOff = slot * PARALLEL_EDGE_TANGENT_OFFSET;
+    const midX = (start.x + end.x) / 2 + px * perpOff + tx * tanOff;
+    const midY = (start.y + end.y) / 2 + py * perpOff + ty * tanOff;
+
+    // Multi-line labels (real `\n` characters, expanded from `\n` escapes by
+    // the parser) split into stacked text rows vertically centered on the
+    // arrow midpoint so the visual block sits on the edge centerline.
+    const lines = t.label.split('\n');
+    if (lines.length > 1) {
+      const lineHeight = EDGE_LABEL_FONT * 1.2;
+      const totalH = lineHeight * lines.length;
+      const startY = midY - totalH / 2 + lineHeight / 2;
+      for (let i = 0; i < lines.length; i++) {
+        shapes.push({
+          type: 'text',
+          x: midX,
+          y: startY + i * lineHeight,
+          text: lines[i]!,
+          anchor: 'middle',
+          baseline: 'middle',
+          font: { family: FONT_FAMILY, size: EDGE_LABEL_FONT, color: '#000' },
+        });
+      }
+    } else {
+      shapes.push({
+        type: 'text',
+        x: midX,
+        y: midY - 4,
+        text: t.label,
+        anchor: 'middle',
+        baseline: 'alphabetic',
+        font: { family: FONT_FAMILY, size: EDGE_LABEL_FONT, color: '#000' },
+      });
+    }
   }
 
   return shapes;

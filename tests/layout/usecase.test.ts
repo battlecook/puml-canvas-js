@@ -324,17 +324,23 @@ describe('use case layout', () => {
       .filter((t) => t === 'Use' || t === 'Use the application');
     expect(useTexts).toEqual(['Use the application']);
 
-    // Three notes (right-of Admin, right-of Use, free-standing N2). Each
-    // contributes a 5-point polygon (the folded-corner outline). Layout may
-    // emit other polygons too (awesome-style actor torsos, etc.) so we
-    // filter on the polygon's signature: exactly 5 points + the note fill.
+    // Three notes (right-of Admin, right-of Use, free-standing N2). The free
+    // standing N2 polygon has 5 points (the folded-corner outline only); the
+    // two attached notes also splice a 3-vertex triangular tail into the edge
+    // facing the anchor, so they each carry 8 points. Layout may emit other
+    // polygons too (awesome-style actor torsos, etc.), so we filter on the
+    // note fill colour rather than vertex count.
     const notePolys = scene.children.filter(
-      (s) =>
-        s.type === 'polygon' &&
-        s.points.length === 5 &&
-        s.style?.fill === '#FEFFDD',
-    );
+      (s) => s.type === 'polygon' && s.style?.fill === '#FEFFDD',
+    ) as Array<{ points: Array<[number, number]> }>;
     expect(notePolys.length).toBe(3);
+    // Each attached note (`note right of X`) gets a TAIL — its polygon must
+    // have more than the 5 base points of a folded-corner outline. The free
+    // standing N2 stays at the original 5 points.
+    const attachedNotePolys = notePolys.filter((s) => s.points.length > 5);
+    expect(attachedNotePolys.length).toBe(2);
+    const freeStandingPolys = notePolys.filter((s) => s.points.length === 5);
+    expect(freeStandingPolys.length).toBe(1);
 
     // The fold polyline (3 points: the corner triangle outline) appears once
     // per note.
@@ -519,6 +525,78 @@ describe('use case layout', () => {
           (s as { text: string }).text === 'to several objects.',
       ),
     ).toBeDefined();
+  });
+
+  it('attached notes render a triangular tail toward the anchor and sit beside it', () => {
+    // Bug-fix regression: `note <side> of X` notes must draw a small speech
+    // bubble TAIL on the side of the note's polygon facing the anchor — the
+    // base folded-corner outline alone reads as a free-floating box. Also
+    // verifies the right-of (Use) note is pinned next to the ellipse's right
+    // edge rather than floating far away.
+    const scene = compile([
+      '@startuml',
+      ':Main Admin: as Admin',
+      '(Use the application) as (Use)',
+      'User -> (Start)',
+      'User --> (Use)',
+      'Admin ---> (Use)',
+      'note right of Admin : This is an example.',
+      'note right of (Use)',
+      '  A note can also be on several lines',
+      'end note',
+      'note "This note is connected\\nto several objects." as N2',
+      '(Start) .. N2',
+      'N2 .. (Use)',
+      '@enduml',
+    ].join('\n'));
+
+    // Both `note right of X` polygons must carry MORE than the 5 base
+    // folded-corner vertices (folded corner + 3-vertex tail = 8 points).
+    const attachedTailPolys = scene.children.filter(
+      (s) =>
+        s.type === 'polygon' &&
+        s.style?.fill === '#FEFFDD' &&
+        s.points.length > 5,
+    ) as Array<{ points: Array<[number, number]> }>;
+    expect(attachedTailPolys.length).toBe(2);
+
+    // The (Use) ellipse: identified by its label text. Its right edge sits
+    // at `cx + rx`.
+    const useLabel = scene.children.find(
+      (s) =>
+        s.type === 'text' &&
+        (s as { text: string }).text === 'Use the application',
+    ) as { x: number; y: number } | undefined;
+    expect(useLabel).toBeDefined();
+    const useEllipse = scene.children.find(
+      (s) =>
+        s.type === 'ellipse' &&
+        Math.abs((s as { cx: number }).cx - useLabel!.x) < 0.5 &&
+        Math.abs((s as { cy: number }).cy - useLabel!.y) < 0.5,
+    ) as { cx: number; cy: number; rx: number; ry: number } | undefined;
+    expect(useEllipse).toBeDefined();
+    const useRightEdge = useEllipse!.cx + useEllipse!.rx;
+
+    // Locate the note polygon attached to (Use): the tail polygon whose
+    // text content includes the wrapped block-note body.
+    const useNoteText = scene.children.find(
+      (s) =>
+        s.type === 'text' &&
+        ((s as { text: string }).text.startsWith('A note can also') ||
+          (s as { text: string }).text === 'several lines'),
+    ) as { x: number; y: number } | undefined;
+    expect(useNoteText).toBeDefined();
+    const useNotePoly = attachedTailPolys.find((p) =>
+      p.points.some(
+        ([px, py]) => px <= useNoteText!.x + 10 && py >= useNoteText!.y - 20,
+      ),
+    );
+    expect(useNotePoly).toBeDefined();
+    // The note's LEFT edge (smallest X, including the tail tip) must sit
+    // within 20 px of the ellipse's right edge.
+    const useNoteLeftX = Math.min(...useNotePoly!.points.map((p) => p[0]));
+    expect(useNoteLeftX - useRightEdge).toBeLessThanOrEqual(20);
+    expect(useNoteLeftX).toBeGreaterThanOrEqual(useRightEdge);
   });
 
   it('keeps short note bodies on a single line (no spurious wrap)', () => {
@@ -1266,6 +1344,96 @@ describe('use case layout', () => {
     expect(labelByText('blue dotted')?.font?.color).toBe('blue');
     // The unstyled `normal` label stays at the default colour.
     expect(labelByText('normal')?.font?.color).toBe('#000');
+  });
+
+  it('renders actor / usecase declarations with inline #<styleBlock> (fill, stroke, line-style, label color)', () => {
+    // Regression: nodes with a trailing `#…` style block silently disappeared.
+    // The fix peels the block before pattern-matching and forwards the
+    // tokens (fill / lineColor / lineStyle / textColor) to layout.
+    const scene = compile([
+      '@startuml',
+      'actor a',
+      'actor b #pink;line:red;line.bold;text:red',
+      'usecase c #palegreen;line:green;line.dashed;text:green',
+      'usecase d #aliceblue;line:blue;line.dotted;text:blue',
+      '@enduml',
+    ].join('\n'));
+
+    // Two actor heads (a + b) → at least two circles. Two usecase ellipses.
+    const circles = scene.children.filter((s) => s.type === 'circle');
+    expect(circles.length).toBeGreaterThanOrEqual(2);
+    const ellipses = scene.children.filter((s) => s.type === 'ellipse');
+    expect(ellipses).toHaveLength(2);
+
+    // Actor `b`: pink head fill, red stroke, strokeWidth=2 (bold). Find a
+    // circle whose fill is `pink` — that's the head of `b` (actor `a` uses
+    // the default `COLOR_FILL_ACTOR` = `#fefece`).
+    type CircleShape = {
+      type: 'circle';
+      style?: { fill?: string; stroke?: string; strokeWidth?: number; strokeDasharray?: string };
+    };
+    const pinkHead = scene.children.find(
+      (s): s is CircleShape & typeof s =>
+        s.type === 'circle' && (s as CircleShape).style?.fill === 'pink',
+    ) as CircleShape | undefined;
+    expect(pinkHead).toBeDefined();
+    expect(pinkHead!.style?.stroke).toBe('red');
+    expect(pinkHead!.style?.strokeWidth).toBe(2);
+
+    // The actor `b` body strokes (lines) carry the same red bold style. We
+    // can find them by scanning for `line` shapes with stroke=red.
+    type LineShape = {
+      type: 'line';
+      style?: { stroke?: string; strokeWidth?: number; strokeDasharray?: string };
+    };
+    const redBodyLines = scene.children.filter(
+      (s): s is LineShape & typeof s =>
+        s.type === 'line' && (s as LineShape).style?.stroke === 'red',
+    ) as LineShape[];
+    // Stickman = 4 lines (body, arms, two legs); allow >=4 because the bold
+    // marker may add more if other features kick in.
+    expect(redBodyLines.length).toBeGreaterThanOrEqual(4);
+    for (const ln of redBodyLines) {
+      expect(ln.style?.strokeWidth).toBe(2);
+    }
+
+    // Usecase `c`: palegreen fill, green dashed stroke (`4,2`).
+    type EllipseShape = {
+      type: 'ellipse';
+      style?: { fill?: string; stroke?: string; strokeDasharray?: string };
+    };
+    const paleGreenEllipse = ellipses.find(
+      (e) => (e as EllipseShape).style?.fill === 'palegreen',
+    ) as EllipseShape | undefined;
+    expect(paleGreenEllipse).toBeDefined();
+    expect(paleGreenEllipse!.style?.stroke).toBe('green');
+    expect(paleGreenEllipse!.style?.strokeDasharray).toBe('4,2');
+
+    // Usecase `d`: aliceblue fill, blue dotted stroke (`2,3`).
+    const aliceBlueEllipse = ellipses.find(
+      (e) => (e as EllipseShape).style?.fill === 'aliceblue',
+    ) as EllipseShape | undefined;
+    expect(aliceBlueEllipse).toBeDefined();
+    expect(aliceBlueEllipse!.style?.stroke).toBe('blue');
+    expect(aliceBlueEllipse!.style?.strokeDasharray).toBe('2,3');
+
+    // Label text colours come from the `text:<color>` token of each block.
+    type TextShape = {
+      type: 'text';
+      text: string;
+      font?: { color?: string };
+    };
+    const labelByText = (s: string) =>
+      scene.children.find(
+        (sh): sh is TextShape & typeof sh =>
+          sh.type === 'text' && (sh as TextShape).text === s,
+      ) as TextShape | undefined;
+
+    expect(labelByText('b')?.font?.color).toBe('red');
+    expect(labelByText('c')?.font?.color).toBe('green');
+    expect(labelByText('d')?.font?.color).toBe('blue');
+    // Default actor `a` keeps the standard black label.
+    expect(labelByText('a')?.font?.color).toBe('#000');
   });
 
   it('renders actor, usecase, and an embedded JSON table when `allowmixing` is set', () => {

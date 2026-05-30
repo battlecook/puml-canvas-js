@@ -10,6 +10,15 @@ export interface ClassMember {
   params: string;
   isStatic: boolean;
   isAbstract: boolean;
+  /**
+   * Verbatim display text for member declarations that don't fit the
+   * UML-style `name : type` / `name(params) : type` shape — e.g. Java-style
+   * `String data` or `void methods()`. When set, layout renders this text
+   * (after visibility/modifier prefixes) instead of reconstructing the line
+   * from `name`/`type`/`params`. Absent for normal UML-style members so
+   * existing render paths are unchanged.
+   */
+  displayText?: string;
 }
 
 export interface EnumConstant {

@@ -24,6 +24,7 @@ import {
 } from '../common/edges.js';
 import type { BoxSize, EdgeAttrs, EdgeStyle, NodeCenter, Position } from '../common/types.js';
 import { layoutStateNested } from './nested.js';
+import { sdlOutlineShape } from './shapes.js';
 
 function hasAnyChildren(states: StateNode[]): boolean {
   for (const s of states) {
@@ -43,6 +44,12 @@ const NORMAL_PAD_X = 14;
 const NORMAL_PAD_Y = 8;
 const NORMAL_MIN_W = 70;
 const NORMAL_MIN_H = 30;
+// Vertical space between the name section and the divider line that opens the
+// description section.
+const DIVIDER_GAP = 8;
+// Vertical space between adjacent description rows inside the description
+// section.
+const DESC_ROW_GAP = 2;
 const INITIAL_SIZE = 16;
 const FINAL_SIZE = 18;
 const CHOICE_SIZE = 28;
@@ -294,10 +301,16 @@ function measureState(s: StateNode): BoxSize {
       const nameM = measureText(s.name, FONT_LABEL);
       let w = nameM.width;
       let h = nameM.height;
-      if (s.description) {
-        const descM = measureText(s.description, FONT_LABEL);
-        w = Math.max(w, descM.width);
-        h += descM.height + 4;
+      const descs = s.descriptions ?? [];
+      if (descs.length > 0) {
+        // Divider + per-row text. Each row stacks vertically.
+        h += DIVIDER_GAP;
+        for (let i = 0; i < descs.length; i++) {
+          const descM = measureText(descs[i]!, FONT_LABEL);
+          w = Math.max(w, descM.width);
+          h += descM.height;
+          if (i < descs.length - 1) h += DESC_ROW_GAP;
+        }
       }
       return {
         w: Math.max(NORMAL_MIN_W, w + NORMAL_PAD_X * 2),
@@ -383,18 +396,21 @@ function drawState(node: StateNode, pos: Position, sz: BoxSize): Shape[] {
     case 'normal':
     default: {
       const textColor = node.textColor ?? '#000';
+      const strokeColor = node.lineColor ?? COLOR_LINE;
+      const baseStyle = rectStyleFor(node, COLOR_NORMAL_FILL, COLOR_LINE);
       const shapes: Shape[] = [
-        {
+        sdlOutlineShape(node, pos.x, pos.y, sz.w, sz.h, baseStyle) ?? {
           type: 'rect',
           x: pos.x, y: pos.y, w: sz.w, h: sz.h,
           rx: 8, ry: 8,
-          style: rectStyleFor(node, COLOR_NORMAL_FILL, COLOR_LINE),
+          style: baseStyle,
         },
       ];
-      if (node.description) {
-        const lh = measureText(node.name, FONT_LABEL).height;
-        const nameY = pos.y + NORMAL_PAD_Y + lh / 2;
-        const descY = nameY + lh / 2 + 4 + measureText(node.description, FONT_LABEL).height / 2;
+      const descs = node.descriptions ?? [];
+      if (descs.length > 0) {
+        const nameH = measureText(node.name, FONT_LABEL).height;
+        const nameY = pos.y + NORMAL_PAD_Y + nameH / 2;
+        const dividerY = nameY + nameH / 2 + DIVIDER_GAP / 2;
         shapes.push({
           type: 'text',
           x: cx, y: nameY,
@@ -404,13 +420,24 @@ function drawState(node: StateNode, pos: Position, sz: BoxSize): Shape[] {
           font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
         });
         shapes.push({
-          type: 'text',
-          x: cx, y: descY,
-          text: node.description,
-          anchor: 'middle',
-          baseline: 'middle',
-          font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+          type: 'line',
+          x1: pos.x, y1: dividerY,
+          x2: pos.x + sz.w, y2: dividerY,
+          style: { stroke: strokeColor, strokeWidth: 1 },
         });
+        let rowTop = dividerY + DIVIDER_GAP / 2;
+        for (const desc of descs) {
+          const dh = measureText(desc, FONT_LABEL).height;
+          shapes.push({
+            type: 'text',
+            x: cx, y: rowTop + dh / 2,
+            text: desc,
+            anchor: 'middle',
+            baseline: 'middle',
+            font: { family: FONT_FAMILY, size: FONT_LABEL, color: textColor },
+          });
+          rowTop += dh + DESC_ROW_GAP;
+        }
       } else {
         shapes.push({
           type: 'text',

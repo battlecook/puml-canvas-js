@@ -792,6 +792,69 @@ describe('use case parser', () => {
     expect(bar1?.kind).toBe('usecase');
   });
 
+  it('parses inline `#<styleBlock>` on actor / usecase node declarations (regression: styled nodes were silently dropped)', () => {
+    // The bug: an `actor X #pink;line:red;line.bold;text:red` line failed every
+    // declaration regex because none accepted a `#`-prefixed tail, so the
+    // whole node vanished from the AST. The fix peels the inline style block
+    // (using the same grammar `peelInlineStyle` already implements for arrows)
+    // before pattern-matching, and stores the resolved fill / stroke / style
+    // / textColor on the node.
+    const a = ast([
+      '@startuml',
+      'actor a',
+      'actor b #pink;line:red;line.bold;text:red',
+      'usecase c #palegreen;line:green;line.dashed;text:green',
+      'usecase d #aliceblue;line:blue;line.dotted;text:blue',
+      '@enduml',
+    ].join('\n'));
+
+    // All four nodes survive parsing.
+    expect(a.nodes).toHaveLength(4);
+    expect(a.nodes.map((n) => n.id)).toEqual(['a', 'b', 'c', 'd']);
+
+    // Bare `actor a` carries no overrides (regression guard for the default
+    // path so the new peel doesn't accidentally pollute unrelated nodes).
+    const nodeA = a.nodes[0]!;
+    expect(nodeA).toMatchObject({ id: 'a', kind: 'actor' });
+    expect(nodeA.fill).toBeUndefined();
+    expect(nodeA.lineColor).toBeUndefined();
+    expect(nodeA.lineStyle).toBeUndefined();
+    expect(nodeA.textColor).toBeUndefined();
+
+    // `actor b #pink;line:red;line.bold;text:red` → pink fill, red bold
+    // strokes, red label.
+    expect(a.nodes[1]).toMatchObject({
+      id: 'b',
+      kind: 'actor',
+      fill: 'pink',
+      lineColor: 'red',
+      lineStyle: 'bold',
+      textColor: 'red',
+    });
+
+    // `usecase c #palegreen;line:green;line.dashed;text:green` → palegreen
+    // ellipse fill, green dashed stroke, green label.
+    expect(a.nodes[2]).toMatchObject({
+      id: 'c',
+      kind: 'usecase',
+      fill: 'palegreen',
+      lineColor: 'green',
+      lineStyle: 'dashed',
+      textColor: 'green',
+    });
+
+    // `usecase d #aliceblue;line:blue;line.dotted;text:blue` → aliceblue
+    // ellipse fill, blue dotted stroke, blue label.
+    expect(a.nodes[3]).toMatchObject({
+      id: 'd',
+      kind: 'usecase',
+      fill: 'aliceblue',
+      lineColor: 'blue',
+      lineStyle: 'dotted',
+      textColor: 'blue',
+    });
+  });
+
   it('accepts `allowmixing` and parses an embedded `json NAME { ... }` block', () => {
     const a = ast([
       '@startuml',

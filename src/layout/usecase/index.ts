@@ -1,5 +1,6 @@
 import type {
   LabelBlock,
+  NoteSide,
   UCNode,
   UCRelationship,
   UseCaseAst,
@@ -77,6 +78,11 @@ const COLOR_CONTAINER_STROKE = '#999';
 const NOTE_PAD_X = 8;
 const NOTE_PAD_Y = 6;
 const NOTE_FOLD = 8;
+// Attached-note speech-bubble tail: the tip protrudes ~10 px from the note's
+// edge toward the anchor, and the tail's base on the edge spans `NOTE_TAIL_HALF
+// × 2` ≈ 10 px.
+const NOTE_TAIL_TIP = 10;
+const NOTE_TAIL_HALF = 5;
 const NOTE_MIN_W = 60;
 // Maximum rendered text width (in px) for a single note line before it is
 // auto-wrapped on word boundaries by `wrapNoteText`. Matches the wrap behavior
@@ -972,6 +978,37 @@ interface NodeStyleTokens {
   fill?: string;
   stroke?: string;
   fontFamily?: string;
+  /**
+   * `strokeDasharray` resolved from a per-node inline `lineStyle`
+   * (`dashed` -> `4,2`, `dotted` -> `2,3`). Absent for solid / bold.
+   */
+  strokeDasharray?: string;
+  /**
+   * Stroke width override from `lineStyle === 'bold'`. Absent otherwise so
+   * per-shape defaults (1, 1.5) still apply.
+   */
+  strokeWidth?: number;
+  /**
+   * Label colour override from the inline `text:<color>` token. Layout
+   * substitutes this for the hard-coded `#000` label fill when set.
+   */
+  textColor?: string;
+}
+
+/**
+ * Translate a node-level `lineStyle` into the matching `strokeDasharray` /
+ * `strokeWidth` pair, mirroring the relationship-edge convention used by
+ * `drawLayeredEdge` (and the same as state/container nested-style maps).
+ * Returns an empty object for `'solid'` / `undefined` so callers can spread
+ * the result without overwriting their per-shape defaults.
+ */
+function lineStyleToStrokeAttrs(
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold',
+): { strokeDasharray?: string; strokeWidth?: number } {
+  if (lineStyle === 'bold') return { strokeWidth: 2 };
+  if (lineStyle === 'dashed') return { strokeDasharray: '4,2' };
+  if (lineStyle === 'dotted') return { strokeDasharray: '2,3' };
+  return {};
 }
 
 function resolveUsecaseTokens(
@@ -988,6 +1025,14 @@ function resolveUsecaseTokens(
   if (fill) tokens.fill = fill;
   const stroke = lookupStereotypeColor(ast, 'bordercolor', node.stereotype) ?? skin.borderColor;
   if (stroke) tokens.stroke = stroke;
+  // Inline `#<styleBlock>` overrides on the declaration line win over both
+  // the skin map and any stereotype-scoped colour.
+  if (node.fill) tokens.fill = node.fill;
+  if (node.lineColor) tokens.stroke = node.lineColor;
+  if (node.textColor) tokens.textColor = node.textColor;
+  const lineAttrs = lineStyleToStrokeAttrs(node.lineStyle);
+  if (lineAttrs.strokeDasharray) tokens.strokeDasharray = lineAttrs.strokeDasharray;
+  if (lineAttrs.strokeWidth) tokens.strokeWidth = lineAttrs.strokeWidth;
   return tokens;
 }
 
@@ -1001,6 +1046,13 @@ function resolveActorTokens(
   if (fill) tokens.fill = fill;
   const stroke = lookupStereotypeColor(ast, 'actorbordercolor', node.stereotype) ?? skin.actorBorderColor;
   if (stroke) tokens.stroke = stroke;
+  // Inline `#<styleBlock>` overrides take precedence over skin defaults.
+  if (node.fill) tokens.fill = node.fill;
+  if (node.lineColor) tokens.stroke = node.lineColor;
+  if (node.textColor) tokens.textColor = node.textColor;
+  const lineAttrs = lineStyleToStrokeAttrs(node.lineStyle);
+  if (lineAttrs.strokeDasharray) tokens.strokeDasharray = lineAttrs.strokeDasharray;
+  if (lineAttrs.strokeWidth) tokens.strokeWidth = lineAttrs.strokeWidth;
   if (skin.actorFontName) tokens.fontFamily = skin.actorFontName;
   return tokens;
 }
@@ -1037,11 +1089,11 @@ function drawNode(
     return shapes;
   }
   if (node.kind === 'note') {
-    return drawUsecaseNote(node.text ?? node.name, pos, sz);
+    return drawUsecaseNote(node.text ?? node.name, pos, sz, node.anchorSide);
   }
   const tokens = resolveUsecaseTokens(node, ast, skin);
   if (node.labelBlocks && node.labelBlocks.length > 0) {
-    const shapes = drawUsecaseBlocks(node.labelBlocks, pos, sz);
+    const shapes = drawUsecaseBlocks(node.labelBlocks, pos, sz, tokens);
     // Multi-block usecases now draw an ellipse outline, so the business chord
     // uses the same ellipse-aware geometry as the single-line variant.
     if (node.business) shapes.splice(1, 0, drawBusinessMarkerEllipse(pos, sz, tokens));
@@ -1210,7 +1262,12 @@ function wrapNoteText(text: string): string {
  * PlantUML "post-it" look: a light-yellow rect with the top-right corner
  * dog-eared. Multi-line bodies (split on `\n`) stack vertically inside.
  */
-function drawUsecaseNote(text: string, pos: Position, sz: BoxSize): Shape[] {
+function drawUsecaseNote(
+  text: string,
+  pos: Position,
+  sz: BoxSize,
+  anchorSide?: NoteSide,
+): Shape[] {
   const shapes: Shape[] = [];
   const x = pos.x;
   const y = pos.y;
@@ -1218,15 +1275,65 @@ function drawUsecaseNote(text: string, pos: Position, sz: BoxSize): Shape[] {
   const h = sz.h;
   const noteStyle = { fill: COLOR_NOTE_FILL, stroke: COLOR_NOTE_STROKE, strokeWidth: 1 };
   const foldStyle = { fill: 'none', stroke: COLOR_NOTE_STROKE, strokeWidth: 1 };
+  // Base outline (clockwise from top-left): top-left, top-right-before-fold,
+  // fold-corner, bottom-right, bottom-left. Attached notes splice a small
+  // triangular TAIL into the edge facing the anchor so the note reads like a
+  // speech bubble (matches PlantUML's reference rendering).
+  const points: Array<[number, number]> = [
+    [x, y],
+    [x + w - NOTE_FOLD, y],
+    [x + w, y + NOTE_FOLD],
+    [x + w, y + h],
+    [x, y + h],
+  ];
+  if (anchorSide) {
+    const tip = NOTE_TAIL_TIP;
+    const half = NOTE_TAIL_HALF;
+    const midX = x + w / 2;
+    const midY = y + h / 2;
+    if (anchorSide === 'right') {
+      // Note is RIGHT of the anchor → tail on the note's LEFT edge, pointing
+      // left toward the anchor. Splice after bottom-left, before closing back
+      // to top-left.
+      points.push([x, midY + half]);
+      points.push([x - tip, midY]);
+      points.push([x, midY - half]);
+    } else if (anchorSide === 'left') {
+      // Tail on the note's RIGHT edge. Splice between fold-corner and
+      // bottom-right so the tail sits inside the straight portion of the
+      // right edge (below the fold).
+      const rightTail: Array<[number, number]> = [
+        [x + w, midY - half],
+        [x + w + tip, midY],
+        [x + w, midY + half],
+      ];
+      // Insert AFTER index 2 (the fold-corner) so the right edge becomes
+      // fold-corner → tail-top → tip → tail-bottom → bottom-right.
+      points.splice(3, 0, ...rightTail);
+    } else if (anchorSide === 'top') {
+      // Tail on the BOTTOM edge, pointing down. The bottom edge is traversed
+      // from bottom-right (index 3) to bottom-left (index 4) — splice the
+      // three tail vertices between them.
+      const bottomTail: Array<[number, number]> = [
+        [midX + half, y + h],
+        [midX, y + h + tip],
+        [midX - half, y + h],
+      ];
+      points.splice(4, 0, ...bottomTail);
+    } else if (anchorSide === 'bottom') {
+      // Tail on the TOP edge, pointing up. Splice between top-left (index 0)
+      // and top-right-before-fold (index 1).
+      const topTail: Array<[number, number]> = [
+        [midX - half, y],
+        [midX, y - tip],
+        [midX + half, y],
+      ];
+      points.splice(1, 0, ...topTail);
+    }
+  }
   shapes.push({
     type: 'polygon',
-    points: [
-      [x, y],
-      [x + w - NOTE_FOLD, y],
-      [x + w, y + NOTE_FOLD],
-      [x + w, y + h],
-      [x, y + h],
-    ],
+    points,
     style: noteStyle,
   });
   shapes.push({
@@ -1268,6 +1375,7 @@ function actorLabelShapes(
   cx: number,
   bottomY: number,
   fontFam: string,
+  textColor: string = '#000',
 ): Shape[] {
   const lines = name.split('\n');
   const lineH = Math.ceil(FONT_LABEL * 1.25);
@@ -1283,7 +1391,7 @@ function actorLabelShapes(
       text: lines[i]!,
       anchor: 'middle',
       baseline: 'alphabetic',
-      font: { family: fontFam, size: FONT_LABEL, color: '#000' },
+      font: { family: fontFam, size: FONT_LABEL, color: textColor },
     });
   }
   return out;
@@ -1293,16 +1401,22 @@ function drawActor(name: string, pos: Position, sz: BoxSize, tokens: NodeStyleTo
   const cx = pos.x + sz.w / 2;
   const figureTop = pos.y + 4;
   const strokeColor = tokens.stroke ?? COLOR_LINE;
-  const stroke = { stroke: strokeColor, strokeWidth: 1 };
+  // Per-node `lineStyle` may bump stroke width (bold) or swap in a dasharray
+  // (dashed / dotted). Spread the override AFTER `strokeWidth: 1` so the
+  // base default holds when no override is present.
+  const strokeWidth = tokens.strokeWidth ?? 1;
+  const strokeAttrs = tokens.strokeDasharray
+    ? { stroke: strokeColor, strokeWidth, strokeDasharray: tokens.strokeDasharray }
+    : { stroke: strokeColor, strokeWidth };
   const headFill = tokens.fill ?? COLOR_FILL_ACTOR;
   const fontFam = tokens.fontFamily ?? FONT_FAMILY;
   return [
-    { type: 'circle', cx, cy: figureTop + 6, r: 6, style: { fill: headFill, ...stroke } },
-    { type: 'line', x1: cx, y1: figureTop + 12, x2: cx, y2: figureTop + 32, style: stroke },
-    { type: 'line', x1: cx - 12, y1: figureTop + 20, x2: cx + 12, y2: figureTop + 20, style: stroke },
-    { type: 'line', x1: cx, y1: figureTop + 32, x2: cx - 9, y2: figureTop + 44, style: stroke },
-    { type: 'line', x1: cx, y1: figureTop + 32, x2: cx + 9, y2: figureTop + 44, style: stroke },
-    ...actorLabelShapes(name, cx, pos.y + sz.h - 4, fontFam),
+    { type: 'circle', cx, cy: figureTop + 6, r: 6, style: { fill: headFill, ...strokeAttrs } },
+    { type: 'line', x1: cx, y1: figureTop + 12, x2: cx, y2: figureTop + 32, style: strokeAttrs },
+    { type: 'line', x1: cx - 12, y1: figureTop + 20, x2: cx + 12, y2: figureTop + 20, style: strokeAttrs },
+    { type: 'line', x1: cx, y1: figureTop + 32, x2: cx - 9, y2: figureTop + 44, style: strokeAttrs },
+    { type: 'line', x1: cx, y1: figureTop + 32, x2: cx + 9, y2: figureTop + 44, style: strokeAttrs },
+    ...actorLabelShapes(name, cx, pos.y + sz.h - 4, fontFam, tokens.textColor),
   ];
 }
 
@@ -1323,11 +1437,17 @@ function drawActorAwesome(name: string, pos: Position, sz: BoxSize, tokens: Node
   const torsoX = cx - torsoW / 2;
   // Overlap top of torso with bottom of head by ~2px so they merge visually.
   const torsoY = headCy + headR - 2;
-  const fillStroke = {
+  const fillStroke: {
+    fill: string;
+    stroke: string;
+    strokeWidth: number;
+    strokeDasharray?: string;
+  } = {
     fill: tokens.fill ?? COLOR_AWESOME_FILL,
     stroke: tokens.stroke ?? COLOR_AWESOME_STROKE,
-    strokeWidth: 1,
+    strokeWidth: tokens.strokeWidth ?? 1,
   };
+  if (tokens.strokeDasharray) fillStroke.strokeDasharray = tokens.strokeDasharray;
   const fontFam = tokens.fontFamily ?? FONT_FAMILY;
   return [
     { type: 'circle', cx, cy: headCy, r: headR, style: fillStroke },
@@ -1341,7 +1461,7 @@ function drawActorAwesome(name: string, pos: Position, sz: BoxSize, tokens: Node
       ry: torsoW / 2,
       style: fillStroke,
     },
-    ...actorLabelShapes(name, cx, pos.y + sz.h - 4, fontFam),
+    ...actorLabelShapes(name, cx, pos.y + sz.h - 4, fontFam, tokens.textColor),
   ];
 }
 
@@ -1357,7 +1477,14 @@ function drawActorHollow(name: string, pos: Position, sz: BoxSize, tokens: NodeS
   const headR = 9;
   const headCy = figureTop + headR;
   const strokeColor = tokens.stroke ?? COLOR_LINE;
-  const stroke = { stroke: strokeColor, strokeWidth: 1.5 };
+  // Hollow baseline is `strokeWidth: 1.5`; a `lineStyle: 'bold'` override
+  // bumps it to 2 (matching the bold-stroke convention used elsewhere).
+  const strokeAttrs: {
+    stroke: string;
+    strokeWidth: number;
+    strokeDasharray?: string;
+  } = { stroke: strokeColor, strokeWidth: tokens.strokeWidth ?? 1.5 };
+  if (tokens.strokeDasharray) strokeAttrs.strokeDasharray = tokens.strokeDasharray;
   const bodyTop = headCy + headR;
   const bodyBottom = bodyTop + 18;
   const fontFam = tokens.fontFamily ?? FONT_FAMILY;
@@ -1367,16 +1494,16 @@ function drawActorHollow(name: string, pos: Position, sz: BoxSize, tokens: NodeS
       cx,
       cy: headCy,
       r: headR,
-      style: { fill: tokens.fill ?? '#FFFFFF', ...stroke },
+      style: { fill: tokens.fill ?? '#FFFFFF', ...strokeAttrs },
     },
-    { type: 'line', x1: cx, y1: bodyTop, x2: cx, y2: bodyBottom, style: stroke },
+    { type: 'line', x1: cx, y1: bodyTop, x2: cx, y2: bodyBottom, style: strokeAttrs },
     {
       type: 'line',
       x1: cx - 12,
       y1: bodyTop + 6,
       x2: cx + 12,
       y2: bodyTop + 6,
-      style: stroke,
+      style: strokeAttrs,
     },
     {
       type: 'line',
@@ -1384,7 +1511,7 @@ function drawActorHollow(name: string, pos: Position, sz: BoxSize, tokens: NodeS
       y1: bodyBottom,
       x2: cx - 9,
       y2: bodyBottom + 12,
-      style: stroke,
+      style: strokeAttrs,
     },
     {
       type: 'line',
@@ -1392,15 +1519,29 @@ function drawActorHollow(name: string, pos: Position, sz: BoxSize, tokens: NodeS
       y1: bodyBottom,
       x2: cx + 9,
       y2: bodyBottom + 12,
-      style: stroke,
+      style: strokeAttrs,
     },
-    ...actorLabelShapes(name, cx, pos.y + sz.h - 4, fontFam),
+    ...actorLabelShapes(name, cx, pos.y + sz.h - 4, fontFam, tokens.textColor),
   ];
 }
 
 function drawUsecase(name: string, pos: Position, sz: BoxSize, stereotype?: string, tokens: NodeStyleTokens = {}): Shape[] {
   const cx = pos.x + sz.w / 2;
   const cy = pos.y + sz.h / 2;
+  // Ellipse style: apply inline `lineStyle` (bold → strokeWidth 2; dashed /
+  // dotted → strokeDasharray) and `textColor` overrides resolved upstream.
+  const ellipseStyle: {
+    fill: string;
+    stroke: string;
+    strokeWidth: number;
+    strokeDasharray?: string;
+  } = {
+    fill: tokens.fill ?? COLOR_FILL_UC,
+    stroke: tokens.stroke ?? COLOR_LINE,
+    strokeWidth: tokens.strokeWidth ?? 1,
+  };
+  if (tokens.strokeDasharray) ellipseStyle.strokeDasharray = tokens.strokeDasharray;
+  const labelColor = tokens.textColor ?? '#000';
   const shapes: Shape[] = [
     {
       type: 'ellipse',
@@ -1408,7 +1549,7 @@ function drawUsecase(name: string, pos: Position, sz: BoxSize, stereotype?: stri
       cy,
       rx: sz.w / 2,
       ry: sz.h / 2,
-      style: { fill: tokens.fill ?? COLOR_FILL_UC, stroke: tokens.stroke ?? COLOR_LINE, strokeWidth: 1 },
+      style: ellipseStyle,
     },
   ];
   if (stereotype) {
@@ -1436,7 +1577,7 @@ function drawUsecase(name: string, pos: Position, sz: BoxSize, stereotype?: stri
       text: name,
       anchor: 'middle',
       baseline: 'middle',
-      font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
+      font: { family: FONT_FAMILY, size: FONT_LABEL, color: labelColor },
     });
     return shapes;
   }
@@ -1447,7 +1588,7 @@ function drawUsecase(name: string, pos: Position, sz: BoxSize, stereotype?: stri
     text: name,
     anchor: 'middle',
     baseline: 'middle',
-    font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
+    font: { family: FONT_FAMILY, size: FONT_LABEL, color: labelColor },
   });
   return shapes;
 }
@@ -1463,13 +1604,35 @@ function drawUsecase(name: string, pos: Position, sz: BoxSize, stereotype?: stri
  * `rx * sqrt(1 - (dy/ry)^2)` where `dy` is the line's vertical offset from
  * the ellipse center.
  */
-function drawUsecaseBlocks(blocks: LabelBlock[], pos: Position, sz: BoxSize): Shape[] {
+function drawUsecaseBlocks(
+  blocks: LabelBlock[],
+  pos: Position,
+  sz: BoxSize,
+  tokens: NodeStyleTokens = {},
+): Shape[] {
   const shapes: Shape[] = [];
   const cx = pos.x + sz.w / 2;
   const cy = pos.y + sz.h / 2;
   const rx = sz.w / 2;
   const ry = sz.h / 2;
   const lineHeight = FONT_LABEL * 1.25;
+  // Honour the per-node inline `#<styleBlock>` overrides resolved upstream
+  // (fill / lineColor / lineStyle / textColor). The separators below keep
+  // their fixed stroke colour — they're structural row dividers, not part of
+  // the outline whose colour the user is overriding.
+  const ellipseStroke = tokens.stroke ?? COLOR_LINE;
+  const ellipseStyle: {
+    fill: string;
+    stroke: string;
+    strokeWidth: number;
+    strokeDasharray?: string;
+  } = {
+    fill: tokens.fill ?? COLOR_FILL_UC,
+    stroke: ellipseStroke,
+    strokeWidth: tokens.strokeWidth ?? 1,
+  };
+  if (tokens.strokeDasharray) ellipseStyle.strokeDasharray = tokens.strokeDasharray;
+  const labelColor = tokens.textColor ?? '#000';
 
   shapes.push({
     type: 'ellipse',
@@ -1477,7 +1640,7 @@ function drawUsecaseBlocks(blocks: LabelBlock[], pos: Position, sz: BoxSize): Sh
     cy,
     rx,
     ry,
-    style: { fill: COLOR_FILL_UC, stroke: COLOR_LINE, strokeWidth: 1 },
+    style: ellipseStyle,
   });
 
   // Content is centered vertically inside the ellipse. Total content height
@@ -1508,7 +1671,7 @@ function drawUsecaseBlocks(blocks: LabelBlock[], pos: Position, sz: BoxSize): Sh
           text: ln,
           anchor: 'middle',
           baseline: 'alphabetic',
-          font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
+          font: { family: FONT_FAMILY, size: FONT_LABEL, color: labelColor },
         });
         y += lineHeight;
       }
@@ -1560,7 +1723,7 @@ function drawUsecaseBlocks(blocks: LabelBlock[], pos: Position, sz: BoxSize): Sh
         text: b.text,
         anchor: 'middle',
         baseline: 'alphabetic',
-        font: { family: FONT_FAMILY, size: FONT_LABEL, color: '#000' },
+        font: { family: FONT_FAMILY, size: FONT_LABEL, color: labelColor },
       });
       y += lineHeight;
       const yLine = y + UC_BLOCK_SEP_H / 2;

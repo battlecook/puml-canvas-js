@@ -23,8 +23,9 @@ describe('class layout — namespace package frames', () => {
     expect(texts).toContain('X1');
     expect(texts).toContain('X2');
     expect(texts).toContain('foo');
-    // Member from the body of the inner class is rendered.
-    expect(texts).toContain('+info: String');
+    // Member from the body of the inner class is rendered. The leading `+`
+    // visibility is drawn as a colored icon, so it's stripped from the text.
+    expect(texts).toContain('info: String');
   });
 
   it('does not draw package frames when `set separator none` is used', () => {

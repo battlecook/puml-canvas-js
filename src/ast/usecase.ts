@@ -61,6 +61,33 @@ export interface UCNode {
    * mark on the figure to distinguish a business actor from a regular one.
    */
   business?: boolean;
+  /**
+   * Fill colour parsed from an inline `#<styleBlock>` trailing the node
+   * declaration (e.g. `actor b #pink;line:red`). Applies to the actor head
+   * circle / awesome silhouette body, or to the use-case ellipse interior.
+   * Overrides any skin-derived default when present.
+   */
+  fill?: string;
+  /**
+   * Stroke colour for the node outline, parsed from the inline `#<styleBlock>`
+   * via the `line:<color>` token (or used as a fallback for a bare colour
+   * when no `line:` was given but a stroke would otherwise be the only
+   * sensible target). Layout substitutes this for the default border colour.
+   */
+  lineColor?: string;
+  /**
+   * Per-node line-style override parsed from the inline `#<styleBlock>`.
+   * `line.bold` thickens the stroke, `line.dashed` / `line.dotted` swap in
+   * the matching `strokeDasharray`. Layout reads this when drawing the
+   * actor body / use-case ellipse outline.
+   */
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold';
+  /**
+   * Label text colour parsed from the inline `#<styleBlock>` via the
+   * `text:<color>` token. Layout uses this in place of the default label
+   * colour for the node's name (and multi-block rows, for use cases).
+   */
+  textColor?: string;
 }
 
 export interface UCRelationship {

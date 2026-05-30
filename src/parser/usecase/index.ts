@@ -271,6 +271,20 @@ interface InlineStyle {
   textColor?: string;
 }
 
+/**
+ * Same as `InlineStyle` but for NODE declarations, which have a separate
+ * "fill" slot (the shape interior) in addition to the stroke. A bare
+ * `#<color>` at the head of the block becomes the fill, not the line colour,
+ * matching PlantUML's `actor X #pink` form.
+ */
+interface InlineNodeStyle {
+  stripped: string;
+  fill?: string;
+  lineColor?: string;
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold';
+  textColor?: string;
+}
+
 // `#<token>(;<token>)*` — a hash flush against a token consisting of
 // `[\w.:#-]` characters, optionally chained with `;`-separated sub-tokens.
 // Sub-tokens may include `:` (`line:red`, `text:red`) and `.` (`line.bold`),
@@ -337,6 +351,62 @@ function peelInlineStyle(line: string): InlineStyle {
     // overall colour (line + fill); for relationships there's no fill to set,
     // so we route it to the stroke.
     if (!out.lineColor) out.lineColor = tok;
+  }
+  return out;
+}
+
+/**
+ * Variant of `peelInlineStyle` for actor / usecase NODE declarations.
+ *
+ * Recognises the same `;`-separated token grammar (`line:<color>`,
+ * `line.bold|dashed|dotted`, `text:<color>`) but routes a bare colour to the
+ * shape's FILL rather than its stroke. That matches PlantUML's node form:
+ *   `actor b #pink;line:red;line.bold;text:red`
+ * where `#pink` paints the actor's head circle pink and `line:red` paints
+ * the strokes red. For relationships there's no fill, which is why the
+ * sibling helper routes bare colours to the line instead.
+ *
+ * Returns the line with the `#<styleBlock>` removed (so the declaration
+ * regexes can match the bare `actor b` head) plus the extracted style
+ * tokens. If no block is present, `stripped` is the input verbatim.
+ */
+function peelInlineNodeStyle(line: string): InlineNodeStyle {
+  const m = INLINE_STYLE_BLOCK.exec(line);
+  if (!m) return { stripped: line };
+  const blockStart = m.index + (m[0].length - m[1]!.length);
+  const blockEnd = blockStart + m[1]!.length;
+  const stripped = (line.slice(0, blockStart) + line.slice(blockEnd))
+    .replace(/\s+/g, ' ')
+    .trim();
+  const body = m[1]!.slice(1); // drop the leading `#`
+  const out: InlineNodeStyle = { stripped };
+  for (const rawTok of body.split(';')) {
+    const tok = rawTok.trim();
+    if (!tok) continue;
+    if (/^line:/i.test(tok)) {
+      out.lineColor = tok.slice(5).trim();
+      continue;
+    }
+    if (/^text:/i.test(tok)) {
+      out.textColor = tok.slice(5).trim();
+      continue;
+    }
+    if (/^line\.bold$/i.test(tok)) {
+      out.lineStyle = 'bold';
+      continue;
+    }
+    if (/^line\.dashed$/i.test(tok)) {
+      out.lineStyle = 'dashed';
+      continue;
+    }
+    if (/^line\.dotted$/i.test(tok)) {
+      out.lineStyle = 'dotted';
+      continue;
+    }
+    // Bare colour — node form treats this as the fill (shape interior).
+    // Subsequent bare colours are ignored so the FIRST bare colour wins,
+    // matching PlantUML's "the leading #colour is the fill" convention.
+    if (!out.fill) out.fill = tok;
   }
   return out;
 }
@@ -563,10 +633,17 @@ export function parseUseCase(source: string): UseCaseAst {
     // parser, where a trailing `<<…>>` (e.g. `: <<include>>` label) means
     // something entirely different.
     const peeledStereo = peelStereotype(text);
+    // Peel an inline `#<styleBlock>` (`#pink;line:red;line.bold;text:red`)
+    // off the declaration BEFORE the business `/` marker so the rest of the
+    // line that reaches the pattern matchers below ends right after the
+    // identifier (or alias) — exactly the shape the declaration regexes
+    // expect. Without this peel, an `actor b #pink;…` line would fail every
+    // pattern (no regex accepts a `#`-prefixed tail) and silently drop.
+    const peeledNodeStyle = peelInlineNodeStyle(peeledStereo.stripped);
     // Peel the "business" `/` marker too: `(Foo)/` or `usecase/`. Run this
     // after stereotype peeling so a `/` inside `<<…>>` can't accidentally
     // match. The downstream patterns see the slash-stripped form.
-    const { stripped, business } = peelBusinessMarker(peeledStereo.stripped);
+    const { stripped, business } = peelBusinessMarker(peeledNodeStyle.stripped);
     const stereotype = peeledStereo.stereotype;
     const applyStereo = (n: UCNode) => {
       if (stereotype) n.stereotype = stereotype;
@@ -575,6 +652,14 @@ export function parseUseCase(source: string): UseCaseAst {
       // render the marker (left chord for usecase ellipses; small slash at
       // the bottom-right of actor figures).
       if (business && (n.kind === 'usecase' || n.kind === 'actor')) n.business = true;
+      // Inline `#<styleBlock>` tokens become per-node visual overrides. Each
+      // is optional — only the keys present in the source line are forwarded
+      // to the AST, so untouched nodes still get their skin / hard-coded
+      // defaults at layout time.
+      if (peeledNodeStyle.fill) n.fill = peeledNodeStyle.fill;
+      if (peeledNodeStyle.lineColor) n.lineColor = peeledNodeStyle.lineColor;
+      if (peeledNodeStyle.lineStyle) n.lineStyle = peeledNodeStyle.lineStyle;
+      if (peeledNodeStyle.textColor) n.textColor = peeledNodeStyle.textColor;
       return n;
     };
 

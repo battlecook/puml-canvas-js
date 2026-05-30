@@ -123,6 +123,35 @@ describe('class parser — members', () => {
     expect(a.classes[0]?.members).toHaveLength(1);
   });
 
+  it('captures Java-style `type name` / `type name()` members verbatim', () => {
+    // PlantUML accepts both UML-style `name : type` and Java-style
+    // `type name` (or `type name(args)`). The parser stores Java-style
+    // lines as verbatim displayText so layout renders them as-is.
+    const a = ast([
+      '@startuml',
+      'class Dummy {',
+      '  String data',
+      '  void methods()',
+      '}',
+      'class Flight {',
+      '  flightNumber : Integer',
+      '  departureTime : Date',
+      '}',
+      '@enduml',
+    ].join('\n'));
+    const dummy = a.classes.find((c) => c.id === 'Dummy');
+    expect(dummy?.members).toHaveLength(2);
+    const dummyTexts = dummy!.members.map((m) => m.displayText ?? m.name);
+    expect(dummyTexts).toContain('String data');
+    expect(dummyTexts).toContain('void methods()');
+    // Flight keeps using the existing UML-style parser path.
+    const flight = a.classes.find((c) => c.id === 'Flight');
+    expect(flight?.members.map((m) => ({ name: m.name, type: m.type }))).toEqual([
+      { name: 'flightNumber', type: 'Integer' },
+      { name: 'departureTime', type: 'Date' },
+    ]);
+  });
+
   it('sets hideEmptyMembers when `hide empty members` directive is present', () => {
     const a = ast('@startuml\nhide empty members\nclass A\n@enduml');
     expect(a.hideEmptyMembers).toBe(true);

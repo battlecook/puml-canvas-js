@@ -72,7 +72,8 @@ describe('class compact-badge mode', () => {
     const texts = scene.children
       .filter((s) => s.type === 'text')
       .map((s) => (s as { text: string }).text);
-    expect(texts).toContain('+id: int');
+    // Visibility character is rendered as an icon, not part of the text.
+    expect(texts).toContain('id: int');
     // Should be no compact badge letter for this class — only the box.
     // No solid filled circles (badges use opaque fill colors).
     const badgeCircles = scene.children.filter(
@@ -218,6 +219,105 @@ describe('class layout — visibility prefix', () => {
   });
 });
 
+describe('class layout — member visibility icons', () => {
+  // PlantUML-style per-member visibility glyphs are drawn at the left of each
+  // member row:
+  //   - private  (`-`) → red    square   (hollow for fields, filled for methods)
+  //   - protected (`#`) → gold   diamond  (hollow / filled)
+  //   - package  (`~`) → blue   triangle (hollow / filled)
+  //   - public   (`+`) → green  circle   (hollow / filled)
+  const SRC = [
+    '@startuml',
+    'class Dummy {',
+    '  -privateField',
+    '  #protectedField',
+    '  ~packageField',
+    '  +publicField',
+    '  -privateMethod()',
+    '  #protectedMethod()',
+    '  ~packageMethod()',
+    '  +publicMethod()',
+    '}',
+    '@enduml',
+  ].join('\n');
+
+  const VIS_COLORS = ['#c82930', '#e3b505', '#3777c8', '#3aac3d'];
+
+  function visibilityIcons(scene: ReturnType<typeof compile>) {
+    return scene.children.filter((s) => {
+      if (s.type !== 'rect' && s.type !== 'polygon' && s.type !== 'circle') {
+        return false;
+      }
+      const stroke = (s as { style?: { stroke?: string } }).style?.stroke;
+      return typeof stroke === 'string' && VIS_COLORS.includes(stroke);
+    });
+  }
+
+  it('renders one icon per member — 4 hollow fields + 4 filled methods', () => {
+    const scene = compile(SRC);
+    const icons = visibilityIcons(scene);
+    expect(icons).toHaveLength(8);
+    const hollow = icons.filter(
+      (s) => (s as { style: { fill?: string } }).style.fill === '#fff',
+    );
+    const filled = icons.filter(
+      (s) => (s as { style: { fill?: string } }).style.fill !== '#fff',
+    );
+    expect(hollow).toHaveLength(4);
+    expect(filled).toHaveLength(4);
+  });
+
+  it('uses the correct shape per visibility character', () => {
+    const scene = compile(SRC);
+    const icons = visibilityIcons(scene);
+    interface IconRow {
+      type: string;
+      vertices?: number;
+      fill: string;
+      stroke: string;
+    }
+    const rows: IconRow[] = icons.map((s) => {
+      const row: IconRow = {
+        type: s.type,
+        fill: (s as { style: { fill?: string } }).style.fill ?? '',
+        stroke: (s as { style: { stroke?: string } }).style.stroke ?? '',
+      };
+      if (s.type === 'polygon') {
+        row.vertices = (s as { points: Array<[number, number]> }).points.length;
+      }
+      return row;
+    });
+    // Expected order matches declaration: fields first (hollow, white fill),
+    // then methods (filled, colored fill). Within each section the order is
+    // private/protected/package/public.
+    expect(rows).toEqual([
+      // Fields (hollow)
+      { type: 'rect',                     fill: '#fff', stroke: '#c82930' },
+      { type: 'polygon', vertices: 4,     fill: '#fff', stroke: '#e3b505' },
+      { type: 'polygon', vertices: 3,     fill: '#fff', stroke: '#3777c8' },
+      { type: 'circle',                   fill: '#fff', stroke: '#3aac3d' },
+      // Methods (filled)
+      { type: 'rect',                     fill: '#c82930', stroke: '#c82930' },
+      { type: 'polygon', vertices: 4,     fill: '#e3b505', stroke: '#e3b505' },
+      { type: 'polygon', vertices: 3,     fill: '#3777c8', stroke: '#3777c8' },
+      { type: 'circle',                   fill: '#3aac3d', stroke: '#3aac3d' },
+    ]);
+  });
+
+  it('strips the visibility character from the displayed member text', () => {
+    const scene = compile(SRC);
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    // The visibility character is rendered as an icon — it must not appear
+    // as a prefix on the member's text row.
+    expect(texts).toContain('privateField');
+    expect(texts).toContain('publicMethod()');
+    expect(texts).not.toContain('-privateField');
+    expect(texts).not.toContain('+publicMethod()');
+  });
+});
+
 describe('class layout — inline extends/implements', () => {
   it('renders two hollow-triangle arrows for inline implements + extends', () => {
     const scene = compile(
@@ -326,5 +426,27 @@ describe('class layout — remove', () => {
     // Empty-diagram fallback emits a single placeholder text and no class rects.
     const rects = scene.children.filter((s) => s.type === 'rect');
     expect(rects).toHaveLength(0);
+  });
+
+  it('renders Java-style `type name` / `type name()` member rows verbatim', () => {
+    const scene = compile(
+      [
+        '@startuml',
+        'class Dummy {',
+        '  String data',
+        '  void methods()',
+        '}',
+        '@enduml',
+      ].join('\n'),
+    );
+    const texts = scene.children
+      .filter((s) => s.type === 'text')
+      .map((s) => (s as { text: string }).text);
+    // The Java-style member lines render verbatim (no leading visibility
+    // glyph, no `: type` suffix appended), and both appear below the
+    // class name.
+    expect(texts).toContain('Dummy');
+    expect(texts).toContain('String data');
+    expect(texts).toContain('void methods()');
   });
 });
