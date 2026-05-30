@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The project is pre-1.0. While the public API is stable across patch releases,
 > minor releases (0.X.0) may introduce breaking changes until 1.0.0.
 
+## [0.8.0] - 2026-05-30
+
+### Added
+
+- **Advanced state diagram support.** State diagrams now parse and render
+  concurrent composite regions split by `--` or `||`, including separate
+  region-local initial/final pseudo-states and dashed region separators.
+- **State history and SDL pseudo-shapes.** Added `[H]` / `[H*]` history
+  pseudo-states, fork/join/start/end stereotype rendering, multi-line
+  transition labels, state description rows, and SDL-style shape stereotypes
+  such as `<<sdlreceive>>`, `<<output>>`, and `<<task>>`.
+- **Class member rendering parity.** Class members now render
+  PlantUML-style visibility glyphs as colored icons, with hollow icons for
+  fields and filled icons for methods.
+- **Java-style class members.** Class diagrams now preserve Java-style
+  `type name` and `type name()` member rows verbatim instead of forcing them
+  through UML-style `name: type` formatting.
+- **Use case rendering refinements.** Use case parsing, AST data, and layout
+  gained additional styling and rendering coverage for the expanded
+  compatibility surface.
+
+### Fixed
+
+- **Composite state parenting.** Forward-referenced states are reparented when
+  later declared as explicit composite siblings, avoiding accidental nesting
+  under the wrong parent.
+- **State label and shape edge cases.** Escaped `\n` transition labels now
+  split into real multi-line text rows, pseudo-state labels no longer leak as
+  normal state names, and history nodes render inside their owning composite.
+
+### Tests
+
+- Test suite grew from 787 -> 820 cases. New coverage spans state concurrent
+  regions, history pseudo-states, SDL state shapes, multi-line state labels,
+  class visibility icons, Java-style class members, use case rendering
+  refinements, and updated class golden snapshots.
+
 ## [0.7.0] - 2026-05-30
 
 ### Added
