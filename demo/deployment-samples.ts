@@ -275,81 +275,219 @@ node n #aliceblue;line:blue;line.dotted;text:blue
     title: '18. Change element color and style (inline style)',
     source: `@startuml
 agent a
-cloud c #pink;line:red;line.bold;text:red [ c cloud description ]
-file f #palegreen;line:green;line.dashed;text:green { [c1] [c2] }
-frame frame { node n #aliceblue;line:blue;line.dotted;text:blue }
+cloud c #pink;line:red;line.bold;text:red [
+c cloud description
+]
+file f #palegreen;line:green;line.dashed;text:green {
+[c1]
+[c2]
+}
+frame frame {
+node n #aliceblue;line:blue;line.dotted;text:blue
+}
 @enduml`,
   },
   {
     title: '19. Nestable elements',
     source: `@startuml
-action action { }
-artifact artifact { }
-card card { }
-cloud cloud { }
-component component { }
-database database { }
-file file { }
-folder folder { }
-frame frame { }
-hexagon hexagon { }
-node node { }
-package package { }
-process process { }
-queue queue { }
-rectangle rectangle { }
-stack stack { }
-storage storage { }
+action action {
+}
+artifact artifact {
+}
+card card {
+}
+cloud cloud {
+}
+component component {
+}
+database database {
+}
+file file {
+}
+folder folder {
+}
+frame frame {
+}
+hexagon hexagon {
+}
+node node {
+}
+package package {
+}
+process process {
+}
+queue queue {
+}
+rectangle rectangle {
+}
+stack stack {
+}
+storage storage {
+}
 @enduml`,
   },
   {
     title: '20. Packages and nested elements',
     source: `@startuml
-artifact artifactVeryLOOOOOOOOOOOOOOOOOOOg as "artifact" { file f1 }
-card cardVeryLOOOOOOOOOOOOOOOOOOOg as "card" { file f2 }
-cloud cloudVeryLOOOOOOOOOOOOOOOOOOOg as "cloud" { file f3 }
-component componentVeryLOOOOOOOOOOOOOOOOOOOg as "component" { file f4 }
-database databaseVeryLOOOOOOOOOOOOOOOOOOOg as "database" { file f5 }
-file fileVeryLOOOOOOOOOOOOOOOOOOOg as "file" { file f6 }
-folder folderVeryLOOOOOOOOOOOOOOOOOOOg as "folder" { file f7 }
-frame frameVeryLOOOOOOOOOOOOOOOOOOOg as "frame" { file f8 }
-hexagon hexagonVeryLOOOOOOOOOOOOOOOOOOOg as "hexagon" { file f9 }
-node nodeVeryLOOOOOOOOOOOOOOOOOOOg as "node" { file f10 }
-package packageVeryLOOOOOOOOOOOOOOOOOOOg as "package" { file f11 }
-queue queueVeryLOOOOOOOOOOOOOOOOOOOg as "queue" { file f12 }
-rectangle rectangleVeryLOOOOOOOOOOOOOOOOOOOg as "rectangle" { file f13 }
-stack stackVeryLOOOOOOOOOOOOOOOOOOOg as "stack" { file f14 }
-storage storageVeryLOOOOOOOOOOOOOOOOOOOg as "storage" { file f15 }
+artifact artifactVeryLOOOOOOOOOOOOOOOOOOOg as "artifact" {
+file f1
+}
+card cardVeryLOOOOOOOOOOOOOOOOOOOg as "card" {
+file f2
+}
+cloud cloudVeryLOOOOOOOOOOOOOOOOOOOg as "cloud" {
+file f3
+}
+component componentVeryLOOOOOOOOOOOOOOOOOOOg as "component" {
+file f4
+}
+database databaseVeryLOOOOOOOOOOOOOOOOOOOg as "database" {
+file f5
+}
+file fileVeryLOOOOOOOOOOOOOOOOOOOg as "file" {
+file f6
+}
+folder folderVeryLOOOOOOOOOOOOOOOOOOOg as "folder" {
+file f7
+}
+frame frameVeryLOOOOOOOOOOOOOOOOOOOg as "frame" {
+file f8
+}
+hexagon hexagonVeryLOOOOOOOOOOOOOOOOOOOg as "hexagon" {
+file f9
+}
+node nodeVeryLOOOOOOOOOOOOOOOOOOOg as "node" {
+file f10
+}
+package packageVeryLOOOOOOOOOOOOOOOOOOOg as "package" {
+file f11
+}
+queue queueVeryLOOOOOOOOOOOOOOOOOOOg as "queue" {
+file f12
+}
+rectangle rectangleVeryLOOOOOOOOOOOOOOOOOOOg as "rectangle" {
+file f13
+}
+stack stackVeryLOOOOOOOOOOOOOOOOOOOg as "stack" {
+file f14
+}
+storage storageVeryLOOOOOOOOOOOOOOOOOOOg as "storage" {
+file f15
+}
 @enduml`,
   },
   {
     title: '21. Packages and nested elements',
     source: `@startuml
-artifact Foo1 { folder Foo2 }
-folder Foo3 { artifact Foo4 }
-frame Foo5 { database Foo6 }
-cloud vpc { node ec2 { stack stack } }
+artifact Foo1 {
+folder Foo2
+}
+folder Foo3 {
+artifact Foo4
+}
+frame Foo5 {
+database Foo6
+}
+cloud vpc {
+ node ec2 {
+stack stack
+}
+}
 @enduml`,
   },
   {
     title: '22. Packages and nested elements',
     source: `@startuml
-node Foo1 { cloud Foo2 }
-cloud Foo3 { frame Foo4 }
-database Foo5 { storage Foo6 }
-storage Foo7 { storage Foo8 }
+node Foo1 {
+cloud Foo2
+}
+cloud Foo3 {
+frame Foo4
+}
+database Foo5 {
+storage Foo6
+}
+storage Foo7 {
+storage Foo8
+}
 @enduml`,
   },
   {
     title: '23. Packages and nested elements',
     source: `@startuml
-action action { artifact artifact { card card { cloud cloud { component component { database database { file file { folder folder { frame frame { hexagon hexagon { node node { package package { process process { queue queue { rectangle rectangle { stack stack { storage storage { } } } } } } } } } } } } } } } } }
+action action {
+ artifact artifact {
+ card card {
+ cloud cloud {
+ component component {
+ database database {
+ file file {
+ folder folder {
+ frame frame {
+ hexagon hexagon {
+ node node {
+ package package {
+ process process {
+ queue queue {
+ rectangle rectangle {
+ stack stack {
+ storage storage {
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
 @enduml`,
   },
   {
     title: '24. Packages and nested elements',
     source: `@startuml
-storage storage { stack stack { rectangle rectangle { queue queue { process process { package package { node node { hexagon hexagon { frame frame { folder folder { file file { database database { component component { cloud cloud { card card { artifact artifact { action action { } } } } } } } } } } } } } } } } }
+storage storage {
+ stack stack {
+ rectangle rectangle {
+ queue queue {
+ process process {
+ package package {
+ node node {
+ hexagon hexagon {
+ frame frame {
+ folder folder {
+ file file {
+ database database {
+ component component {
+ cloud cloud {
+ card card {
+ artifact artifact {
+ action action {
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
 @enduml`,
   },
   {
@@ -359,7 +497,9 @@ node Node1 as n1
 node "Node 2" as n2
 file f1 as "File 1"
 cloud c1 as "this is a cloud"
-cloud c2 [this is another cloud]
+cloud c2 [
+this is another cloud
+]
 n1 -> n2
 n1 --> f1
 f1 -> c1
@@ -429,8 +569,12 @@ usecase usecaseVeryLOOOOOOOOOOOOOOOOOOOg as "usecase"
   {
     title: '28. Round corner',
     source: `@startuml
-skinparam rectangle { roundCorner<<Concept>> 25 }
-rectangle "Concept Model" <<Concept>> { rectangle "Example 1" <<Concept>> as ex1 rectangle "Another rectangle" }
+skinparam rectangle {
+roundCorner<<Concept>> 25
+}
+rectangle "Concept Model" <<Concept>> {
+rectangle "Example 1" <<Concept>> as ex1 rectangle "Another rectangle"
+}
 @enduml`,
   },
   {
@@ -554,45 +698,96 @@ usecase/ "usecase/" #aliceblue;line:blue;line.dotted;text:blue
   {
     title: '34. Appendix: Test of inline style on all element',
     source: `@startuml
-action action #aliceblue;line:blue;line.dotted;text:blue { }
-artifact artifact #aliceblue;line:blue;line.dotted;text:blue { }
-card card #aliceblue;line:blue;line.dotted;text:blue { }
-cloud cloud #aliceblue;line:blue;line.dotted;text:blue { }
-component component #aliceblue;line:blue;line.dotted;text:blue { }
-database database #aliceblue;line:blue;line.dotted;text:blue { }
-file file #aliceblue;line:blue;line.dotted;text:blue { }
-folder folder #aliceblue;line:blue;line.dotted;text:blue { }
-frame frame #aliceblue;line:blue;line.dotted;text:blue { }
-hexagon hexagon #aliceblue;line:blue;line.dotted;text:blue { }
-node node #aliceblue;line:blue;line.dotted;text:blue { }
-package package #aliceblue;line:blue;line.dotted;text:blue { }
-process process #aliceblue;line:blue;line.dotted;text:blue { }
-queue queue #aliceblue;line:blue;line.dotted;text:blue { }
-rectangle rectangle #aliceblue;line:blue;line.dotted;text:blue { }
-stack stack #aliceblue;line:blue;line.dotted;text:blue { }
-storage storage #aliceblue;line:blue;line.dotted;text:blue { }
+action action #aliceblue;line:blue;line.dotted;text:blue {
+}
+artifact artifact #aliceblue;line:blue;line.dotted;text:blue {
+}
+card card #aliceblue;line:blue;line.dotted;text:blue {
+}
+cloud cloud #aliceblue;line:blue;line.dotted;text:blue {
+}
+component component #aliceblue;line:blue;line.dotted;text:blue {
+}
+database database #aliceblue;line:blue;line.dotted;text:blue {
+}
+file file #aliceblue;line:blue;line.dotted;text:blue {
+}
+folder folder #aliceblue;line:blue;line.dotted;text:blue {
+}
+frame frame #aliceblue;line:blue;line.dotted;text:blue {
+}
+hexagon hexagon #aliceblue;line:blue;line.dotted;text:blue {
+}
+node node #aliceblue;line:blue;line.dotted;text:blue {
+}
+package package #aliceblue;line:blue;line.dotted;text:blue {
+}
+process process #aliceblue;line:blue;line.dotted;text:blue {
+}
+queue queue #aliceblue;line:blue;line.dotted;text:blue {
+}
+rectangle rectangle #aliceblue;line:blue;line.dotted;text:blue {
+}
+stack stack #aliceblue;line:blue;line.dotted;text:blue {
+}
+storage storage #aliceblue;line:blue;line.dotted;text:blue {
+}
 @enduml`,
   },
   {
     title: '35. Appendix: Test of inline style on all element',
     source: `@startuml
-action actionVeryLOOOOOOOOOOOOOOOOOOOg as "action" #aliceblue;line:blue;line.dotted;text:blue { file f1 }
-artifact artifactVeryLOOOOOOOOOOOOOOOOOOOg as "artifact" #aliceblue;line:blue;line.dotted;text:blue { file f1 }
-card cardVeryLOOOOOOOOOOOOOOOOOOOg as "card" #aliceblue;line:blue;line.dotted;text:blue { file f2 }
-cloud cloudVeryLOOOOOOOOOOOOOOOOOOOg as "cloud" #aliceblue;line:blue;line.dotted;text:blue { file f3 }
-component componentVeryLOOOOOOOOOOOOOOOOOOOg as "component" #aliceblue;line:blue;line.dotted;text:blue { file f4 }
-database databaseVeryLOOOOOOOOOOOOOOOOOOOg as "database" #aliceblue;line:blue;line.dotted;text:blue { file f5 }
-file fileVeryLOOOOOOOOOOOOOOOOOOOg as "file" #aliceblue;line:blue;line.dotted;text:blue { file f6 }
-folder folderVeryLOOOOOOOOOOOOOOOOOOOg as "folder" #aliceblue;line:blue;line.dotted;text:blue { file f7 }
-frame frameVeryLOOOOOOOOOOOOOOOOOOOg as "frame" #aliceblue;line:blue;line.dotted;text:blue { file f8 }
-hexagon hexagonVeryLOOOOOOOOOOOOOOOOOOOg as "hexagon" #aliceblue;line:blue;line.dotted;text:blue { file f9 }
-node nodeVeryLOOOOOOOOOOOOOOOOOOOg as "node" #aliceblue;line:blue;line.dotted;text:blue { file f10 }
-package packageVeryLOOOOOOOOOOOOOOOOOOOg as "package" #aliceblue;line:blue;line.dotted;text:blue { file f11 }
-process processVeryLOOOOOOOOOOOOOOOOOOOg as "process" #aliceblue;line:blue;line.dotted;text:blue { file f11 }
-queue queueVeryLOOOOOOOOOOOOOOOOOOOg as "queue" #aliceblue;line:blue;line.dotted;text:blue { file f12 }
-rectangle rectangleVeryLOOOOOOOOOOOOOOOOOOOg as "rectangle" #aliceblue;line:blue;line.dotted;text:blue { file f13 }
-stack stackVeryLOOOOOOOOOOOOOOOOOOOg as "stack" #aliceblue;line:blue;line.dotted;text:blue { file f14 }
-storage storageVeryLOOOOOOOOOOOOOOOOOOOg as "storage" #aliceblue;line:blue;line.dotted;text:blue { file f15 }
+action actionVeryLOOOOOOOOOOOOOOOOOOOg as "action" #aliceblue;line:blue;line.dotted;text:blue {
+file f1
+}
+artifact artifactVeryLOOOOOOOOOOOOOOOOOOOg as "artifact" #aliceblue;line:blue;line.dotted;text:blue {
+file f1
+}
+card cardVeryLOOOOOOOOOOOOOOOOOOOg as "card" #aliceblue;line:blue;line.dotted;text:blue {
+file f2
+}
+cloud cloudVeryLOOOOOOOOOOOOOOOOOOOg as "cloud" #aliceblue;line:blue;line.dotted;text:blue {
+file f3
+}
+component componentVeryLOOOOOOOOOOOOOOOOOOOg as "component" #aliceblue;line:blue;line.dotted;text:blue {
+file f4
+}
+database databaseVeryLOOOOOOOOOOOOOOOOOOOg as "database" #aliceblue;line:blue;line.dotted;text:blue {
+file f5
+}
+file fileVeryLOOOOOOOOOOOOOOOOOOOg as "file" #aliceblue;line:blue;line.dotted;text:blue {
+file f6
+}
+folder folderVeryLOOOOOOOOOOOOOOOOOOOg as "folder" #aliceblue;line:blue;line.dotted;text:blue {
+file f7
+}
+frame frameVeryLOOOOOOOOOOOOOOOOOOOg as "frame" #aliceblue;line:blue;line.dotted;text:blue {
+file f8
+}
+hexagon hexagonVeryLOOOOOOOOOOOOOOOOOOOg as "hexagon" #aliceblue;line:blue;line.dotted;text:blue {
+file f9
+}
+node nodeVeryLOOOOOOOOOOOOOOOOOOOg as "node" #aliceblue;line:blue;line.dotted;text:blue {
+file f10
+}
+package packageVeryLOOOOOOOOOOOOOOOOOOOg as "package" #aliceblue;line:blue;line.dotted;text:blue {
+file f11
+}
+process processVeryLOOOOOOOOOOOOOOOOOOOg as "process" #aliceblue;line:blue;line.dotted;text:blue {
+file f11
+}
+queue queueVeryLOOOOOOOOOOOOOOOOOOOg as "queue" #aliceblue;line:blue;line.dotted;text:blue {
+file f12
+}
+rectangle rectangleVeryLOOOOOOOOOOOOOOOOOOOg as "rectangle" #aliceblue;line:blue;line.dotted;text:blue {
+file f13
+}
+stack stackVeryLOOOOOOOOOOOOOOOOOOOg as "stack" #aliceblue;line:blue;line.dotted;text:blue {
+file f14
+}
+storage storageVeryLOOOOOOOOOOOOOOOOOOOg as "storage" #aliceblue;line:blue;line.dotted;text:blue {
+file f15
+}
 @enduml`,
   },
   {
@@ -813,21 +1008,36 @@ componentDiagram {
   LineColor red
 }
 </style>
-artifact artifact { }
-card card { }
-cloud cloud { }
-component component { }
-database database { }
-file file { }
-folder folder { }
-frame frame { }
-hexagon hexagon { }
-node node { }
-package package { }
-queue queue { }
-rectangle rectangle { }
-stack stack { }
-storage storage { }
+artifact artifact {
+}
+card card {
+}
+cloud cloud {
+}
+component component {
+}
+database database {
+}
+file file {
+}
+folder folder {
+}
+frame frame {
+}
+hexagon hexagon {
+}
+node node {
+}
+package package {
+}
+queue queue {
+}
+rectangle rectangle {
+}
+stack stack {
+}
+storage storage {
+}
 @enduml`,
   },
   {
@@ -910,21 +1120,36 @@ storage {
   LineColor black
 }
 </style>
-artifact artifact { }
-card card { }
-cloud cloud { }
-component component { }
-database database { }
-file file { }
-folder folder { }
-frame frame { }
-hexagon hexagon { }
-node node { }
-package package { }
-queue queue { }
-rectangle rectangle { }
-stack stack { }
-storage storage { }
+artifact artifact {
+}
+card card {
+}
+cloud cloud {
+}
+component component {
+}
+database database {
+}
+file file {
+}
+folder folder {
+}
+frame frame {
+}
+hexagon hexagon {
+}
+node node {
+}
+package package {
+}
+queue queue {
+}
+rectangle rectangle {
+}
+stack stack {
+}
+storage storage {
+}
 @enduml`,
   },
   {
@@ -940,21 +1165,51 @@ document {
   BackGroundColor white
 }
 </style>
-artifact e1 as "artifact" { file f1 }
-card e2 as "card" { file f2 }
-cloud e3 as "cloud" { file f3 }
-component e4 as "component" { file f4 }
-database e5 as "database" { file f5 }
-file e6 as "file" { file f6 }
-folder e7 as "folder" { file f7 }
-frame e8 as "frame" { file f8 }
-hexagon e9 as "hexagon" { file f9 }
-node e10 as "node" { file f10 }
-package e11 as "package" { file f11 }
-queue e12 as "queue" { file f12 }
-rectangle e13 as "rectangle" { file f13 }
-stack e14 as "stack" { file f14 }
-storage e15 as "storage" { file f15 }
+artifact e1 as "artifact" {
+file f1
+}
+card e2 as "card" {
+file f2
+}
+cloud e3 as "cloud" {
+file f3
+}
+component e4 as "component" {
+file f4
+}
+database e5 as "database" {
+file f5
+}
+file e6 as "file" {
+file f6
+}
+folder e7 as "folder" {
+file f7
+}
+frame e8 as "frame" {
+file f8
+}
+hexagon e9 as "hexagon" {
+file f9
+}
+node e10 as "node" {
+file f10
+}
+package e11 as "package" {
+file f11
+}
+queue e12 as "queue" {
+file f12
+}
+rectangle e13 as "rectangle" {
+file f13
+}
+stack e14 as "stack" {
+file f14
+}
+storage e15 as "storage" {
+file f15
+}
 @enduml`,
   },
   {
@@ -1037,21 +1292,51 @@ storage {
   LineColor black
 }
 </style>
-artifact e1 as "artifact" { file f1 }
-card e2 as "card" { file f2 }
-cloud e3 as "cloud" { file f3 }
-component e4 as "component" { file f4 }
-database e5 as "database" { file f5 }
-file e6 as "file" { file f6 }
-folder e7 as "folder" { file f7 }
-frame e8 as "frame" { file f8 }
-hexagon e9 as "hexagon" { file f9 }
-node e10 as "node" { file f10 }
-package e11 as "package" { file f11 }
-queue e12 as "queue" { file f12 }
-rectangle e13 as "rectangle" { file f13 }
-stack e14 as "stack" { file f14 }
-storage e15 as "storage" { file f15 }
+artifact e1 as "artifact" {
+file f1
+}
+card e2 as "card" {
+file f2
+}
+cloud e3 as "cloud" {
+file f3
+}
+component e4 as "component" {
+file f4
+}
+database e5 as "database" {
+file f5
+}
+file e6 as "file" {
+file f6
+}
+folder e7 as "folder" {
+file f7
+}
+frame e8 as "frame" {
+file f8
+}
+hexagon e9 as "hexagon" {
+file f9
+}
+node e10 as "node" {
+file f10
+}
+package e11 as "package" {
+file f11
+}
+queue e12 as "queue" {
+file f12
+}
+rectangle e13 as "rectangle" {
+file f13
+}
+stack e14 as "stack" {
+file f14
+}
+storage e15 as "storage" {
+file f15
+}
 @enduml`,
   },
   {

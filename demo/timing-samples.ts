@@ -474,7 +474,8 @@ WB is Waiting
 Title This is my title
 header: some header
 footer: some footer
-legend Some legend
+legend
+Some legend
 end legend
 caption some caption
 robust "Web Browser" as WB

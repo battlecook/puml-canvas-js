@@ -6,16 +6,13 @@ import type {
 import type { ClassRelationship } from '../../ast/class.js';
 import type { Scene, Shape, Style } from '../../scene/types.js';
 import { measureText } from '../sequence/measure.js';
+import { buildLayoutEdges, removeCycles } from '../class/sugiyama.js';
 import {
-  assignLayers,
-  buildLayoutEdges,
-  groupByLayer,
-  insertDummies,
-  minimizeCrossings,
-  removeCycles,
-  assignCoordinates,
-  type LayoutEdge,
-} from '../class/sugiyama.js';
+  DotSugiyamaEngine,
+  type EdgeSpec,
+  type LayoutGraph,
+  type NodeSpec,
+} from '../engine/index.js';
 import {
   SELF_LOOP_OUT,
   computeLateralOffsets,
@@ -39,7 +36,6 @@ const TITLE_FONT = 16;
 const TITLE_GAP = 8;
 const LAYER_GAP = 50;
 const HORIZONTAL_GAP = 30;
-const DUMMY_GAP = 12;
 const NORMAL_PAD_X = 14;
 const NORMAL_PAD_Y = 8;
 const NORMAL_MIN_W = 70;
@@ -85,19 +81,25 @@ export function layoutState(ast: StateAst): Scene {
   const sizes = new Map(ast.states.map((s) => [s.id, measureState(s)]));
   const titleHeight = ast.title ? TITLE_FONT + TITLE_GAP : 0;
 
-  const asRel = (t: StateTransition): ClassRelationship => ({
-    source: t.source,
-    target: t.target,
-    sourceMult: '',
-    targetMult: '',
-    arrowToken: t.arrowToken,
-    kind: 'association',
-    style: t.style,
-    sourceMarker: t.sourceMarker,
-    targetMarker: t.targetMarker,
-    label: t.label,
-    labelDirection: 'none',
-  });
+  const asRel = (t: StateTransition): ClassRelationship => {
+    const rel: ClassRelationship = {
+      source: t.source,
+      target: t.target,
+      sourceMult: '',
+      targetMult: '',
+      arrowToken: t.arrowToken,
+      kind: 'association',
+      style: t.style,
+      sourceMarker: t.sourceMarker,
+      targetMarker: t.targetMarker,
+      label: t.label,
+      labelDirection: 'none',
+    };
+    if (t.lineColor) rel.lineColor = t.lineColor;
+    if (t.lineStyle) rel.lineStyle = t.lineStyle;
+    if (t.direction) rel.direction = t.direction;
+    return rel;
+  };
 
   const selfLoops = ast.transitions.filter((t) => t.source === t.target);
   const nonLoops = ast.transitions.filter((t) => t.source !== t.target);
@@ -127,19 +129,14 @@ export function layoutState(ast: StateAst): Scene {
   if (base.drawable) {
     const offsets = computeLateralOffsets(base.drawable);
     for (const edge of base.drawable) {
-      const t = ast.transitions.find(
-        (tr) => tr.source === edge.rel.source && tr.target === edge.rel.target,
-      );
-      const attrs: EdgeAttrs = t
-        ? {
-            source: t.source,
-            target: t.target,
-            style: t.style,
-            sourceMarker: t.sourceMarker,
-            targetMarker: t.targetMarker,
-            label: t.label,
-          }
-        : edge.rel;
+      // `edge.rel` is already the per-edge relationship (source/target,
+      // markers, style and the edge's OWN label) threaded through from the
+      // input transition. We use it directly rather than re-matching against
+      // `ast.transitions` by (source,target): such a match returns the FIRST
+      // transition for a pair, which collapses parallel edges (same endpoints,
+      // different labels) onto a single label. The relationship already
+      // carries the correct per-edge label, so no lookup is needed.
+      const attrs: EdgeAttrs = edge.rel;
       shapes.push(
         ...drawLayeredEdge({
           fromId: edge.fromId,
@@ -151,6 +148,14 @@ export function layoutState(ast: StateAst): Scene {
           centers: base.centers!,
           style: EDGE_STYLE,
           lateralOffset: offsets.get(edge) ?? 0,
+          // Engine flags multi-segment edges as bezier candidates. The
+          // renderer falls back to a polyline when there's nothing to
+          // smooth (i.e. no waypoints), so this is a hint, not a command.
+          ...(edge.curve ? { curve: edge.curve } : {}),
+          // Engine-computed label rectangle (Step D3). When present, the
+          // renderer anchors the label at its centre instead of the
+          // polyline midpoint.
+          ...(edge.labelBox ? { labelBox: edge.labelBox } : {}),
         }),
       );
     }
@@ -180,7 +185,24 @@ interface BaseResult {
   positions: Map<string, Position>;
   width: number;
   height: number;
-  drawable?: Array<{ fromId: string; toId: string; waypoints: string[]; rel: ClassRelationship }>;
+  drawable?: Array<{
+    fromId: string;
+    toId: string;
+    waypoints: string[];
+    rel: ClassRelationship;
+    /**
+     * Visual treatment for this edge passed through from the layout engine.
+     * `'bezier'` when the engine introduced bend points (multi-segment route)
+     * so the renderer can smooth the corners; `'straight'` for direct edges.
+     */
+    curve?: 'straight' | 'bezier';
+    /**
+     * Collision-avoided label rectangle (Phase 1 Step D3). When set, the
+     * renderer anchors the edge's label at the centre of this box instead
+     * of the polyline midpoint.
+     */
+    labelBox?: { x: number; y: number; width: number; height: number };
+  }>;
   centers?: Map<string, NodeCenter>;
 }
 
@@ -207,61 +229,131 @@ function layeredLayout(
   titleHeight: number,
   rels: ClassRelationship[],
 ): BaseResult {
+  // Build a LayoutGraph from state nodes + transitions, run the engine, then
+  // unpack the result into the (positions, centers, drawable) shape that the
+  // existing edge/shape renderers consume.
+  //
+  // `buildLayoutEdges` is reused so that marker-based direction inference
+  // (e.g. `<--` flips source/target) is preserved exactly — the engine itself
+  // is direction-agnostic and would otherwise lay edges out in source-text
+  // order.
+  const nodes = new Map<string, NodeSpec>();
+  for (const s of ast.states) {
+    const sz = sizes.get(s.id)!;
+    nodes.set(s.id, { id: s.id, width: sz.w, height: sz.h });
+  }
+
+  // Mirror the legacy pipeline's two-step orientation:
+  //   1. `buildLayoutEdges` flips edges based on marker (`<--` swaps source/target).
+  //   2. `removeCycles` flips edges as needed to break cycles.
+  // The post-cycle-break orientation is what `drawLayeredEdge` and
+  // `computeLateralOffsets` need: a pair of bidirectional transitions
+  // (A↔B) must share the same (fromId, toId) so their parallel-edge lateral
+  // offsets push them onto opposite sides instead of overlapping.
+  const flipped = buildLayoutEdges(rels);
   const nodeIds = ast.states.map((s) => s.id);
-  const edges: LayoutEdge[] = buildLayoutEdges(rels);
-  removeCycles(nodeIds, edges);
-  const baseLayers = assignLayers(nodeIds, edges);
-  const dummy = insertDummies(nodeIds, edges, baseLayers);
-  const initialGroups = groupByLayer(dummy.extendedNodeIds, dummy.layers);
-  const ordered = minimizeCrossings(initialGroups, dummy.segments);
-
-  const layerHeights = ordered.map((layer) => {
-    let h = 0;
-    for (const id of layer) {
-      if (dummy.dummyIds.has(id)) continue;
-      h = Math.max(h, sizes.get(id)!.h);
+  removeCycles(nodeIds, flipped);
+  // Measure each edge label so the engine's collision-avoidance pass can
+  // size the rectangle it tries to slot off the midpoint. We measure with
+  // the same font size the renderer uses (`EDGE_LABEL_FONT`) and add a
+  // small padding so the avoidance rect has a visible visual buffer.
+  const LABEL_PAD_X = 4;
+  const LABEL_PAD_Y = 2;
+  const edgeSpecs: EdgeSpec[] = flipped.map((e, i) => {
+    // Tag each edge with a stable id = its index in `flipped`. This is what
+    // lets the engine keep *parallel* edges (same from + same to but different
+    // labels, e.g. two `A --> B : …` transitions) as distinct result entries.
+    // We then look each layout back up positionally by the same id below.
+    const spec: EdgeSpec = { id: `e${i}`, from: e.from, to: e.to, label: e.rel.label };
+    if (e.rel.label) {
+      const m = measureText(e.rel.label, EDGE_LABEL_FONT);
+      spec.labelSize = { w: m.width + LABEL_PAD_X * 2, h: m.height + LABEL_PAD_Y * 2 };
     }
-    return h;
+    return spec;
   });
 
-  const coords = assignCoordinates({
-    orderedLayers: ordered,
-    segments: dummy.segments,
-    widthOf: (id) => sizes.get(id)?.w ?? 0,
-    dummyIds: dummy.dummyIds,
-    horizontalGap: HORIZONTAL_GAP,
-    dummyGap: DUMMY_GAP,
-  });
-  const maxW = coords.maxLayerWidth > 0 ? coords.maxLayerWidth : 200;
-  const totalW = maxW + PAGE_PAD * 2;
+  const graph: LayoutGraph = {
+    nodes,
+    edges: edgeSpecs,
+    subgraphs: new Map(),
+  };
 
+  const result = new DotSugiyamaEngine().layout(graph, {
+    defaultDirection: 'TB',
+    nodeSep: HORIZONTAL_GAP,
+    rankSep: LAYER_GAP,
+    margin: PAGE_PAD,
+  });
+
+  // Shift everything down by titleHeight so the title (rendered above the
+  // canvas in `layoutState`) doesn't overlap the top row.
   const positions = new Map<string, Position>();
   const centers = new Map<string, NodeCenter>();
+  for (const [id, nl] of result.nodes) {
+    positions.set(id, { x: nl.x, y: nl.y + titleHeight });
+    centers.set(id, { cx: nl.x + nl.w / 2, cy: nl.y + nl.h / 2 + titleHeight });
+  }
 
-  let cursorY = PAGE_PAD + titleHeight;
-  for (let l = 0; l < ordered.length; l++) {
-    const layer = ordered[l]!;
-    const layerH = layerHeights[l]!;
-    for (const id of layer) {
-      const cx = PAGE_PAD + coords.centerX.get(id)!;
-      const isDummy = dummy.dummyIds.has(id);
-      if (isDummy) {
-        centers.set(id, { cx, cy: cursorY + layerH / 2 });
-      } else {
-        const sz = sizes.get(id)!;
-        positions.set(id, { x: cx - sz.w / 2, y: cursorY });
-        centers.set(id, { cx, cy: cursorY + sz.h / 2 });
+  // Rebuild the legacy `drawable[]` shape from the engine's polyline output.
+  // For each edge with bend points, synthesize stable dummy waypoint IDs and
+  // register their centers; `drawLayeredEdge` reads waypoint vectors out of
+  // the `centers` map.
+  const drawable: Array<{
+    fromId: string;
+    toId: string;
+    waypoints: string[];
+    rel: ClassRelationship;
+    curve?: 'straight' | 'bezier';
+    labelBox?: { x: number; y: number; width: number; height: number };
+  }> = [];
+  let wpCounter = 0;
+  for (let i = 0; i < flipped.length; i++) {
+    const le = flipped[i]!;
+    // Look the layout back up by the same per-edge id we tagged above, so
+    // parallel edges (which share `from`/`to`) each pick up their own polyline
+    // and label box instead of colliding on a shared `from->to` key.
+    const layout = result.edges.get(`e${i}`);
+    const waypoints: string[] = [];
+    if (layout && layout.points.length > 2) {
+      // Interior points are the bends; convert to synthetic centers.
+      for (let p = 1; p < layout.points.length - 1; p++) {
+        const pt = layout.points[p]!;
+        const wpId = `__state_wp_${wpCounter++}`;
+        waypoints.push(wpId);
+        centers.set(wpId, { cx: pt.x, cy: pt.y + titleHeight });
       }
     }
-    cursorY += layerH + LAYER_GAP;
+    drawable.push({
+      fromId: le.from,
+      toId: le.to,
+      waypoints,
+      rel: le.rel,
+      // Propagate the engine's curve hint so `drawLayeredEdge` can choose
+      // between a straight polyline and a smoothed cubic-Bezier path.
+      ...(layout?.curve ? { curve: layout.curve } : {}),
+      // Propagate the engine's collision-avoided label box (Step D3). The
+      // engine anchored it in the (0,0)-anchored coordinate system; we
+      // translate it down by `titleHeight` so it matches the on-screen
+      // positions stored in `positions` / `centers`.
+      ...(layout?.labelBox
+        ? {
+            labelBox: {
+              x: layout.labelBox.x,
+              y: layout.labelBox.y + titleHeight,
+              width: layout.labelBox.width,
+              height: layout.labelBox.height,
+            },
+          }
+        : {}),
+    });
   }
 
   return {
     positions,
     centers,
-    drawable: dummy.drawable,
-    width: totalW,
-    height: cursorY - LAYER_GAP + PAGE_PAD,
+    drawable,
+    width: result.bbox.w,
+    height: result.bbox.h + titleHeight,
   };
 }
 

@@ -82,6 +82,25 @@ export interface StateTransition {
   sourceMarker: EndMarker;
   targetMarker: EndMarker;
   label: string;
+  /**
+   * Per-edge stroke colour from an inline style bracket in the arrow body,
+   * e.g. the `#yellow` in `S1 -left[#yellow]-> S3`. Normalised to `#hex` or a
+   * lowercased CSS colour name. Overrides the default transition colour.
+   */
+  lineColor?: string;
+  /**
+   * Per-edge line-style override from an inline style bracket
+   * (`-[dashed]->`, `-[dotted]->`, `-[#blue,bold]->`). Overrides the
+   * structural {@link style} for rendering. Absent when no style keyword was
+   * present in the arrow bracket.
+   */
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold' | 'hidden';
+  /**
+   * Inline layout-direction hint from a directional arrow (`-left->`,
+   * `-up[...]->`). Captured so it never breaks parsing; layout may consult it
+   * to bias target placement. Absent for plain arrows.
+   */
+  direction?: 'left' | 'right' | 'up' | 'down';
 }
 
 export interface StateAst {

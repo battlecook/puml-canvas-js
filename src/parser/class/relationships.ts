@@ -51,8 +51,109 @@ function stripDirectionHint(line: string): { line: string; direction?: RelationD
   return { line: line.slice(0, start) + line.slice(end), direction };
 }
 
+/**
+ * Inline style/colour bracket embedded in an arrow body, e.g. `-[#red]->`,
+ * `-left[#yellow]->`, `-up[#red,dashed]->`, `-[dotted]->`.
+ *
+ * The bracket sits between the dash run and (optionally) a direction word on
+ * one side, and a dash run + arrow head on the other. PlantUML allows a
+ * comma-separated list of `#color` tokens and style keywords (`dashed`,
+ * `dotted`, `bold`, `plain`, `hidden`, …) in any order.
+ *
+ * Anatomy of the capture:
+ *   group 1: leading marker + dash run + optional direction word (e.g. `-left`)
+ *   group 2: bracket contents (without the `[` `]`)
+ *   group 3: trailing dash run + optional arrow head (e.g. `->`)
+ *
+ * We KEEP groups 1 and 3 (minus the direction word, which the direction-hint
+ * pass handles next) so the remainder is still a well-formed arrow body for
+ * the downstream tokenizer; only the bracket itself is excised.
+ */
+const ARROW_STYLE_BRACKET =
+  /(^|\s)((?:<\||<|o|\*)?-+(?:left|right|up|down|l|r|u|d)?)\[([^\]]*)\](-+(?:\|>|>|o|\*)?)(?=\s|$)/;
+
+/**
+ * Resolved contents of an inline arrow-style bracket.
+ *   - `lineColor`: the first `#color` (or bare colour) token, normalised.
+ *   - `lineStyle`: the first recognised style keyword (`dashed`/`dotted`/
+ *     `bold`/`solid`/`plain`/`hidden` → mapped). `plain` collapses to
+ *     `solid`; `hidden` is kept verbatim so the renderer can suppress the
+ *     stroke if it chooses (currently rendered as solid).
+ */
+const BRACKET_STYLE_KEYS: Record<string, 'solid' | 'dashed' | 'dotted' | 'bold' | 'hidden'> = {
+  dashed: 'dashed',
+  dotted: 'dotted',
+  bold: 'bold',
+  solid: 'solid',
+  plain: 'solid',
+  hidden: 'hidden',
+};
+
+function parseBracketContents(raw: string): {
+  lineColor?: string;
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold' | 'hidden';
+} {
+  const result: { lineColor?: string; lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold' | 'hidden' } = {};
+  for (const tokenRaw of raw.split(',')) {
+    const token = tokenRaw.trim();
+    if (!token) continue;
+    if (token.startsWith('#')) {
+      if (result.lineColor === undefined) result.lineColor = normalizeArrowColor(token);
+      continue;
+    }
+    const style = BRACKET_STYLE_KEYS[token.toLowerCase()];
+    if (style) {
+      if (result.lineStyle === undefined) result.lineStyle = style;
+      continue;
+    }
+    // Bare colour name without `#` (e.g. `red`): treat as line colour if no
+    // colour seen yet and it isn't a recognised keyword.
+    if (result.lineColor === undefined && /^[A-Za-z][\w]*$/.test(token)) {
+      result.lineColor = normalizeArrowColor(token);
+    }
+  }
+  return result;
+}
+
+function normalizeArrowColor(raw: string): string {
+  const trimmed = raw.trim();
+  // Strip a leading `#` to inspect the payload: PlantUML uses `#` both for hex
+  // colours (`#DD00AA`) and as a named-colour shorthand (`#red`, `#yellow`).
+  const body = trimmed.startsWith('#') ? trimmed.slice(1) : trimmed;
+  // A run of 3/4/6/8 hex digits is a hex colour — emit it with a single `#`.
+  if (/^(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(body)) {
+    return `#${body.toLowerCase()}`;
+  }
+  // Otherwise it's a named CSS colour (`red`, `yellow`, `blue`); the renderer
+  // expects the bare lowercase name, so we drop any PlantUML `#` shorthand.
+  return body.toLowerCase();
+}
+
+/**
+ * Detect and strip an inline style/colour bracket (`-[#red,dashed]->`) from
+ * the arrow body. Returns the line with the bracket excised (surrounding
+ * dashes/markers preserved so it still tokenizes as an arrow) plus the parsed
+ * colour/style. No-ops (returns the line unchanged) when no bracket is found.
+ */
+function stripStyleBracket(line: string): {
+  line: string;
+  lineColor?: string;
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold' | 'hidden';
+} {
+  const m = ARROW_STYLE_BRACKET.exec(line);
+  if (!m) return { line };
+  const bracketStart = m.index + m[1]!.length + m[2]!.length;
+  const bracketEnd = bracketStart + m[3]!.length + 2; // include `[` and `]`
+  const cleaned = line.slice(0, bracketStart) + line.slice(bracketEnd);
+  return { line: cleaned, ...parseBracketContents(m[3]!) };
+}
+
 export function parseRelationship(line: string): ClassRelationship | null {
-  const stripped = stripDirectionHint(line);
+  // Order matters: excise the inline style bracket (`-[#red,dashed]->`) FIRST,
+  // because a direction word can sit immediately before it (`-left[...]->`)
+  // with no dash in between, which would otherwise hide the direction hint.
+  const bracket = stripStyleBracket(line);
+  const stripped = stripDirectionHint(bracket.line);
   const work = stripped.line;
   const found = findArrow(work);
   if (!found) return null;
@@ -103,6 +204,19 @@ export function parseRelationship(line: string): ClassRelationship | null {
     labelDirection,
   };
   if (stripped.direction) rel.direction = stripped.direction;
+  // Inline bracket colour overrides the structural stroke colour.
+  if (bracket.lineColor) rel.lineColor = bracket.lineColor;
+  // Inline bracket style overrides the structural line style for rendering.
+  // `hidden` is mapped to a render hint the renderer may special-case; the
+  // structural `style` (solid/dashed) is left intact for semantic kind.
+  if (bracket.lineStyle) {
+    rel.lineStyle = bracket.lineStyle;
+    // Keep the structural `style` in sync for dashed/dotted so downstream
+    // consumers that only look at `style` still see a dashed line.
+    if (bracket.lineStyle === 'dashed' || bracket.lineStyle === 'dotted') {
+      rel.style = 'dashed';
+    }
+  }
   return rel;
 }
 

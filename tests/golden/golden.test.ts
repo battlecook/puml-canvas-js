@@ -655,4 +655,23 @@ describe('golden — state', () => {
       ].join('\n'),
     );
   });
+
+  it('renders multi-rank edges as smooth bezier curves', () => {
+    // A direct A→C edge alongside the A→B→C chain creates a 2-rank-spanning
+    // edge whose route gets a dummy waypoint from sugiyama. With the Step
+    // D1 bezier renderer this edge becomes a smoothed cubic-Bezier `<path>`
+    // instead of a sharp-cornered `<polyline>`. The golden captures that
+    // visual treatment.
+    expectGolden(
+      'state/bezier',
+      [
+        '@startuml',
+        '[*] --> A',
+        'A --> B',
+        'B --> C',
+        'A --> C',
+        '@enduml',
+      ].join('\n'),
+    );
+  });
 });

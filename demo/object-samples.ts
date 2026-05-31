@@ -170,7 +170,6 @@ Foo --> Bar::def : Label two
   {
     title: '14. Program (or project) evaluation and review technique (PERT) with map',
     source: `@startuml
-PERT
 left to right direction
 
 ' Horizontal lines: -->, <--, <-->

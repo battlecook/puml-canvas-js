@@ -113,6 +113,21 @@ export interface ClassRelationship {
    * relative to the source. Absent when the arrow had no hint.
    */
   direction?: RelationDirection;
+  /**
+   * Per-edge stroke colour from an inline style bracket in the arrow body,
+   * e.g. the `#red` in `-[#red]->` / `-up[#red,dashed]->`. Normalised to a
+   * `#hex` or lowercased CSS colour name. Overrides the diagram-wide edge
+   * colour for this relationship. Absent when the arrow had no colour bracket.
+   */
+  lineColor?: string;
+  /**
+   * Per-edge line-style override from an inline style bracket
+   * (`-[dashed]->`, `-[dotted]->`, `-[#blue,bold]->`). Mirrors the four
+   * PlantUML inline-style tokens plus `'hidden'`. Overrides the structural
+   * {@link style} for rendering only. Absent when the arrow had no style
+   * keyword in its bracket.
+   */
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold' | 'hidden';
 }
 
 /**

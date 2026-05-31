@@ -65,7 +65,8 @@ export const SAMPLES_WBS_LIST: ReadonlyArray<WbsSample> = [
     source: `@startwbs
 * <&flag> Debian
 ** <&globe> Ubuntu
-***:Linux Mint Open Source;
+***:Linux Mint
+Open Source;
 *** Kubuntu
 *** ...
 @endwbs`,
@@ -74,32 +75,32 @@ export const SAMPLES_WBS_LIST: ReadonlyArray<WbsSample> = [
     title: '5. Removing box (Several boxless node - Arithmetic notation)',
     source: `@startwbs
 + Project
-+ Part One
-+ Task 1.1
-- LeftTask 1.2
-+ Task 1.3
-+ Part Two
-+ Task 2.1
-+ Task 2.2
--_ Task 2.2.1 To the left boxless
--_ Task 2.2.2 To the Left boxless
-+_ Task 2.2.3 To the right boxless
+++ Part One
++++ Task 1.1
+--- LeftTask 1.2
++++ Task 1.3
+++ Part Two
++++ Task 2.1
++++ Task 2.2
+---_ Task 2.2.1 To the left boxless
+---_ Task 2.2.2 To the Left boxless
++++_ Task 2.2.3 To the right boxless
 @endwbs`,
   },
   {
     title: '6. Removing box (All boxless node - Arithmetic notation)',
     source: `@startwbs
 +_ Project
-+_ Part One
-+_ Task 1.1
--_ LeftTask 1.2
-+_ Task 1.3
-+_ Part Two
-+_ Task 2.1
-+_ Task 2.2
--_ Task 2.2.1 To the left boxless
--_ Task 2.2.2 To the Left boxless
-+_ Task 2.2.3 To the right boxless
+++_ Part One
++++_ Task 1.1
+---_ LeftTask 1.2
++++_ Task 1.3
+++_ Part Two
++++_ Task 2.1
++++_ Task 2.2
+---_ Task 2.2.1 To the left boxless
+---_ Task 2.2.2 To the Left boxless
++++_ Task 2.2.3 To the right boxless
 @endwbs`,
   },
   {
@@ -176,7 +177,8 @@ BackgroundColor SkyBlue
 </style>
 * this is the partner workpackage <<your_style_name>>
 ** this is my workpackage <<pink>>
-**:This is on multiple lines; <<pink>>
+**:This is on
+multiple lines; <<pink>>
 ** this is another workpackage
 @endwbs`,
   },
@@ -195,7 +197,8 @@ BackgroundColor SkyBlue
 </style>
 + this is the partner workpackage <<your_style_name>>
 ++ this is my workpackage <<pink>>
-++:This is on multiple lines; <<pink>>
+++:This is on
+multiple lines; <<pink>>
 ++ this is another workpackage
 @endwbs`,
   },

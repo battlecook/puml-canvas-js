@@ -15,13 +15,13 @@ hide empty members
 abstract abstract
 abstract class "abstract class"
 annotation annotation
-circle circle ()
-circle_short_form
+circle circle
+() circle_short_form
 class class
 class class_stereo <<stereotype>>
 dataclass dataclass
-diamond diamond <>
-diamond_short_form
+diamond diamond
+<> diamond_short_form
 entity entity
 enum enum
 exception exception
@@ -93,7 +93,7 @@ class2 *-- "foo/dummy" : use
     source: `@startuml
 class $C1
 class $C2
-$C2 class "$C2" as dollarC2
+class "$C2" as dollarC2
 remove $C1
 remove $C2
 remove dollarC2

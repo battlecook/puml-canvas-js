@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The project is pre-1.0. While the public API is stable across patch releases,
 > minor releases (0.X.0) may introduce breaking changes until 1.0.0.
 
+## [0.9.0] - 2026-05-31
+
+### Added
+
+- **Layout engine for state diagrams.** Introduced a GraphViz-dot-style
+  `LayoutEngine` interface and a `DotSugiyamaEngine` implementation that drives
+  state-diagram node placement and edge routing, replacing the previous
+  accumulation of layout heuristics with a single, testable pipeline.
+- **External edge-label placement (xlabel).** A force-directed pass places
+  transition labels outside node boxes and apart from one another, so labels no
+  longer render on top of states or stack into an unreadable column.
+- **Parallel and bidirectional edge separation.** Multiple transitions between
+  the same pair of states (including opposite-direction pairs) now fan out as
+  distinct bowed Bézier curves instead of overlapping on a single line, with
+  each label riding its own arc.
+- **Obstacle-avoiding edge routing.** Transitions whose straight path would
+  cross an intervening state or composite frame are re-routed around it using a
+  visibility-graph shortest path; clear paths stay unchanged.
+- **Styled and directional state transitions.** `-[#color]->`,
+  `-[dashed]->` / `-[dotted]->` / `-[bold]->`, and direction-hinted arrows such
+  as `-left[#yellow]->` and `-up[#red,dashed]->` now parse and render with the
+  correct line color, line style, and layout direction (new `lineColor`,
+  `lineStyle`, and `direction` transition attributes).
+- **Demo reference comparison.** The demo gallery now renders the official
+  plantuml.com output beside puml-canvas-js's own rendering for each sample,
+  enabling direct visual fidelity comparison.
+
+### Fixed
+
+- **Composite state edge and label rendering.** Nested/composite state
+  diagrams now flow through the same edge-and-label pipeline as flat diagrams:
+  parallel labels no longer overlap each other or sit inside nodes, transitions
+  no longer pass through sibling states, and the canvas grows to contain labels
+  placed outside the node column.
+- **Dropped styled/directional transitions.** An arrow carrying a direction
+  prefix or a style-only bracket previously failed to parse, silently
+  discarding the edge and any state referenced only by it (e.g. the "Change
+  line color and style" example rendered 2 of 11 states and none of its 7
+  edges). These transitions and their endpoint states are now preserved.
+- **Malformed demo sample sources.** Corrected 57 malformed diagram sources
+  across 11 diagram kinds (activity, deployment, sequence, class, wbs, gantt,
+  object, component, json, timing, wireframe) that the official PlantUML server
+  rejected, so the reference panel renders them.
+
+### Internal
+
+- **State-diagram fidelity harness.** Added `npm run compare:state`, which
+  compares puml-canvas-js's SVG output against the official plantuml.com
+  rendering for every state sample and reports structural divergences (label
+  overlaps, edges through nodes, coincident parallel edges, node/edge counts).
+
+### Tests
+
+- Test suite grew from 820 -> 916 cases. New coverage spans the layout engine,
+  external label placement, parallel/bidirectional edge separation, visibility
+  routing, composite edge-and-label unification, and styled/directional
+  transition parsing and rendering.
+
 ## [0.8.0] - 2026-05-30
 
 ### Added
@@ -585,7 +643,7 @@ Zero runtime dependencies. Dev dependencies: TypeScript, Vite, Vitest, jsdom.
 
 ### Bundle size
 
-`dist/puml-canvas-js.js` ≈ 172 KB / 38 KB gzipped, plus declaration files.
+`dist/puml-canvas-js.js` ≈ 451 KB / 110 KB gzipped, plus declaration files.
 
 ### Licence
 

@@ -288,6 +288,13 @@ export function parseState(source: string): StateAst {
         targetMarker: rel.targetMarker,
         label: unescapeLabel(rel.label),
       };
+      // Carry inline arrow-bracket styling and the direction hint through to
+      // the transition so the renderer can colour/dash the edge and layout can
+      // bias placement. Absent fields stay undefined (no behavioural change for
+      // plain arrows).
+      if (rel.lineColor) trans.lineColor = rel.lineColor;
+      if (rel.lineStyle) trans.lineStyle = rel.lineStyle;
+      if (rel.direction) trans.direction = rel.direction;
       ast.transitions.push(trans);
       continue;
     }

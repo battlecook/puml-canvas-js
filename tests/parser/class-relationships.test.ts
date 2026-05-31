@@ -115,4 +115,16 @@ describe('class relationships — parser', () => {
     expect(ast.relationships[1]).toMatchObject({ label: 'owns',   labelDirection: 'backward' });
     expect(ast.relationships[2]).toMatchObject({ label: 'plain',  labelDirection: 'none' });
   });
+
+  it('parses an inline arrow style/colour bracket `-[#red,dashed]->`', () => {
+    expect(parseRelationship('A -[#DD00AA]-> B')).toMatchObject({
+      source: 'A', target: 'B', lineColor: '#dd00aa',
+    });
+    expect(parseRelationship('A -[dashed]-> B')).toMatchObject({
+      source: 'A', target: 'B', lineStyle: 'dashed', style: 'dashed',
+    });
+    expect(parseRelationship('A -left[#blue,bold]-> B')).toMatchObject({
+      source: 'A', target: 'B', direction: 'left', lineColor: 'blue', lineStyle: 'bold',
+    });
+  });
 });

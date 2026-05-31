@@ -1,4 +1,5 @@
 import { render } from '../src/index.js';
+import { plantumlServerSvgUrl } from './plantuml-server.js';
 import { SAMPLES_SEQUENCE_LIST } from './sequence-samples.js';
 import { SAMPLES_USECASE_LIST } from './usecase-samples.js';
 import { SAMPLES_CLASS_LIST } from './class-samples.js';
@@ -69,6 +70,71 @@ function renderInto(target: HTMLElement, source: string): void {
   }
 }
 
+// Loads the reference rendering for `source` from the official PlantUML server into
+// `target`. Each call is tagged with a token so a stale in-flight request (e.g. from
+// fast typing) cannot overwrite a newer one.
+const originalTokens = new WeakMap<HTMLElement, symbol>();
+function renderOriginal(target: HTMLElement, source: string): void {
+  const token = Symbol('original');
+  originalTokens.set(target, token);
+
+  target.replaceChildren();
+  const placeholder = document.createElement('span');
+  placeholder.className = 'placeholder';
+  placeholder.textContent = 'Loading plantuml.com…';
+  target.appendChild(placeholder);
+
+  plantumlServerSvgUrl(source)
+    .then((url) => {
+      if (originalTokens.get(target) !== token) return;
+      const img = document.createElement('img');
+      img.alt = 'plantuml.com reference rendering';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.addEventListener('error', () => {
+        if (originalTokens.get(target) !== token) return;
+        target.replaceChildren();
+        const pre = document.createElement('pre');
+        pre.textContent = 'Failed to load plantuml.com rendering.';
+        target.appendChild(pre);
+      });
+      target.replaceChildren(img);
+      img.src = url;
+    })
+    .catch((err: unknown) => {
+      if (originalTokens.get(target) !== token) return;
+      target.replaceChildren();
+      const pre = document.createElement('pre');
+      pre.textContent = err instanceof Error ? err.message : String(err);
+      target.appendChild(pre);
+    });
+}
+
+// A labeled output column: a caption above a content `pane` that renderings fill.
+function makePane(
+  paneClass: string,
+  label: string,
+  placeholder: string,
+): { column: HTMLElement; pane: HTMLElement } {
+  const column = document.createElement('div');
+  column.className = 'gallery-column';
+
+  const caption = document.createElement('div');
+  caption.className = 'gallery-column-label';
+  caption.textContent = label;
+  column.appendChild(caption);
+
+  const pane = document.createElement('div');
+  pane.className = paneClass;
+  const ph = document.createElement('span');
+  ph.className = 'placeholder';
+  ph.textContent = placeholder;
+  pane.appendChild(ph);
+  column.appendChild(pane);
+
+  return { column, pane };
+}
+
 function buildGalleryCard(sample: Sample): HTMLElement {
   const card = document.createElement('section');
   card.className = 'gallery-card';
@@ -87,13 +153,11 @@ function buildGalleryCard(sample: Sample): HTMLElement {
   ta.value = sample.source;
   body.appendChild(ta);
 
-  const preview = document.createElement('div');
-  preview.className = 'gallery-preview';
-  const placeholder = document.createElement('span');
-  placeholder.className = 'placeholder';
-  placeholder.textContent = 'Rendering…';
-  preview.appendChild(placeholder);
-  body.appendChild(preview);
+  const preview = makePane('gallery-preview', 'puml-canvas-js', 'Rendering…');
+  body.appendChild(preview.column);
+
+  const original = makePane('gallery-original', 'plantuml.com (original)', 'Loading plantuml.com…');
+  body.appendChild(original.column);
 
   card.appendChild(body);
 
@@ -105,13 +169,17 @@ function buildGalleryCard(sample: Sample): HTMLElement {
     }
     debounceHandle = window.setTimeout(() => {
       debounceHandle = undefined;
-      renderInto(preview, ta.value);
+      renderInto(preview.pane, ta.value);
+      renderOriginal(original.pane, ta.value);
     }, 200);
   });
 
   // Defer the actual render so the placeholder paints first.
   // Using requestAnimationFrame keeps the UI responsive when a kind has many samples.
-  requestAnimationFrame(() => renderInto(preview, sample.source));
+  requestAnimationFrame(() => {
+    renderInto(preview.pane, sample.source);
+    renderOriginal(original.pane, sample.source);
+  });
 
   return card;
 }

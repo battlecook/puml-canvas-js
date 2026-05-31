@@ -22,10 +22,37 @@ export function drawLayeredEdge(
     centers: Map<string, NodeCenter>;
     style: EdgeStyle;
     lateralOffset?: number;
+    /**
+     * Visual treatment of the edge path:
+     *
+     * - `'straight'` (default): the polyline through `[start, ...waypoints, end]`
+     *   is drawn as-is (a `<line>` for 2 points, `<polyline>` for more).
+     * - `'bezier'`: the same control points are smoothed into a single cubic
+     *   Bezier `<path>` and the end-markers are oriented along the curve's
+     *   tangent at its endpoints. Only takes effect when there is at least one
+     *   waypoint (otherwise a 2-point straight edge has nothing to smooth).
+     */
+    curve?: 'straight' | 'bezier';
+    /**
+     * Phase 1 Step D3 — engine-computed label rectangle.
+     *
+     * When provided, the label's anchor point is the centre of this box
+     * (offset by the same vertical baseline-fudge the midpoint fallback uses
+     * for single-line labels) instead of the polyline midpoint. The engine's
+     * collision-avoidance pass slides this box off the midpoint to clear
+     * node rectangles and previously-placed labels — see
+     * `placeLabelBox` in `dot-sugiyama.ts`.
+     *
+     * When undefined, falls back to the polyline-midpoint placement used
+     * before Step D3.
+     */
+    labelBox?: { x: number; y: number; width: number; height: number };
   },
 ): Shape[] {
   const { fromId, toId, waypoints, rel, positions, sizes, centers, style } = params;
   const lateralOffset = params.lateralOffset ?? 0;
+  const curve = params.curve ?? 'straight';
+  const labelBox = params.labelBox;
 
   const sPos = positions.get(fromId);
   const tPos = positions.get(toId);
@@ -50,10 +77,25 @@ export function drawLayeredEdge(
   const rawStart = rectClip(sCx, sCy, sSize.w, sSize.h, firstNext.x, firstNext.y);
   const rawEnd = rectClip(tCx, tCy, tSize.w, tSize.h, lastPrev.x, lastPrev.y);
 
-  const start = applyLateralOffset(rawStart, rawEnd, lateralOffset);
-  const end = applyLateralOffset(rawEnd, rawStart, -lateralOffset);
+  // F2b — multi-edge spline separation. For a single edge (`lateralOffset === 0`)
+  // the start/end stay exactly on the node boundary and the interior is just
+  // the waypoint polyline, so the output is byte-identical to before this pass.
+  //
+  // For one of N≥2 parallel/bidirectional edges (`lateralOffset !== 0`) we keep
+  // the endpoints ANCHORED on the node boundary (so arrowheads still land on
+  // the rect) and instead bow the INTERIOR out perpendicular to the baseline by
+  // `lateralOffset`. `separatedSplinePoints` inserts the bowed control point(s)
+  // and the path is rendered as a smooth cubic Bezier (see `bowed` below), so
+  // two edges of the same node pair become visually distinct curves. Because
+  // `computeLateralOffsets` assigns the bidirectional pair opposite-signed
+  // offsets, the two curves bow to opposite sides.
+  const bowed = lateralOffset !== 0;
+  const start = rawStart;
+  const end = rawEnd;
 
-  const original: Vec[] = [start, ...wpVec, end];
+  const original: Vec[] = bowed
+    ? separatedSplinePoints([start, ...wpVec, end], lateralOffset)
+    : [start, ...wpVec, end];
 
   const startMarker = fromId === rel.source ? rel.sourceMarker : rel.targetMarker;
   const endMarker = fromId === rel.source ? rel.targetMarker : rel.sourceMarker;
@@ -69,19 +111,58 @@ export function drawLayeredEdge(
   const markerColor = rel.lineColor ?? style.markerColor;
   const lineStyle: Style = resolveLineStyle(rel, strokeColor);
 
-  const shapes: Shape[] = [makeLine(shortened, lineStyle)];
+  // Bezier rendering kicks in when EITHER:
+  //   * the engine flagged this edge for smoothing AND there's at least one
+  //     interior bend point (`curve === 'bezier'`), OR
+  //   * this is a separated parallel/bidirectional edge (`bowed`) — its
+  //     interior control point bows off the baseline, so a smooth curve reads
+  //     much better than a kinked polyline.
+  // A 2-point edge with no bow has nothing meaningful to smooth, so it stays a
+  // straight `<line>`. We use the *shortened* polyline as the Bezier's control
+  // hull so the marker (which sits ahead of the shortened endpoint) lines up
+  // with the curve's tip without overshooting the node rect.
+  const useBezier = (curve === 'bezier' || bowed) && shortened.length >= 3;
 
-  const startMarkerShape = drawMarker(startMarker, original[0]!, original[1]!, markerColor);
+  const shapes: Shape[] = [
+    useBezier ? makeBezierPath(shortened, lineStyle) : makeLine(shortened, lineStyle),
+  ];
+
+  // Marker direction uses the curve's TANGENT at the endpoint, not just the
+  // next/prev polyline segment. For the Catmull-Rom-to-Bezier construction
+  // we use, the tangent at p0 is parallel to (p1 - p0) and the tangent at
+  // p[N-1] is parallel to (p[N-1] - p[N-2]) — i.e. the same direction the
+  // straight-line marker uses. We make this explicit by computing it from
+  // `bezierTangentAtStart` / `bezierTangentAtEnd` so future control-point
+  // tweaks can change the marker orientation in lock-step. The bezier-style
+  // tangents are computed against `original` (pre-shortening) so the marker
+  // stays parallel to the actual curve — shortening preserves direction.
+  const startTangentRef = useBezier
+    ? bezierTangentAtStart(original)
+    : { x: original[1]!.x, y: original[1]!.y };
+  const endTangentRef = useBezier
+    ? bezierTangentAtEnd(original)
+    : { x: original[original.length - 2]!.x, y: original[original.length - 2]!.y };
+  const startMarkerShape = drawMarker(startMarker, original[0]!, startTangentRef, markerColor);
   if (startMarkerShape) shapes.push(startMarkerShape);
-  const endMarkerShape = drawMarker(endMarker, original[original.length - 1]!, original[original.length - 2]!, markerColor);
+  const endMarkerShape = drawMarker(endMarker, original[original.length - 1]!, endTangentRef, markerColor);
   if (endMarkerShape) shapes.push(endMarkerShape);
 
   const pointsArr: Array<[number, number]> = original.map((v) => [v.x, v.y]);
   const mid = midpoint(pointsArr);
 
   if (rel.label) {
+    // Phase 1 Step D3 — anchor on the engine-supplied collision-avoided box
+    // when present AND there's no perpendicular `lateralOffset` to worry
+    // about. For parallel edges (`lateralOffset !== 0`) we keep the legacy
+    // perpendicular-shift logic: it already separates labels of A↔B
+    // bidirectional pairs along the perpendicular axis, and the engine
+    // can't see that (it has no notion of which edges are parallel mates).
+    const useLabelBox = labelBox !== undefined && lateralOffset === 0;
+    const anchorPoint: Position = useLabelBox
+      ? { x: labelBox!.x + labelBox!.width / 2, y: labelBox!.y + labelBox!.height / 2 }
+      : mid;
     const labelPlacement = computeLabelPlacement(
-      mid,
+      anchorPoint,
       original,
       lateralOffset,
     );
@@ -271,15 +352,54 @@ export function computeLateralOffsets<E extends { fromId: string; toId: string }
   return out;
 }
 
-function applyLateralOffset(point: Position, other: Position, offset: number): Vec {
-  if (offset === 0) return { x: point.x, y: point.y };
-  const dx = other.x - point.x;
-  const dy = other.y - point.y;
+/**
+ * F2b — build a *separated spline* control polyline for one edge of a parallel
+ * (or bidirectional) group.
+ *
+ * Given the edge's baseline control points `[start, ...waypoints, end]` and a
+ * signed perpendicular `displacement` (the edge's lateral offset within its
+ * group), this returns a new control polyline whose ENDPOINTS are unchanged
+ * (so arrowheads still land on the node boundary) but whose INTERIOR bows out
+ * perpendicular to the start→end baseline by `displacement`. When fed to
+ * `makeBezierPath` the result is a smooth curve that bows to one side of the
+ * baseline; the bidirectional mate, which receives the opposite-signed
+ * displacement from `computeLateralOffsets`, bows to the other side.
+ *
+ * - `displacement === 0` returns the input unchanged (single-edge case).
+ * - A 2-point baseline (no waypoints) gains a single bowed midpoint control
+ *   point, turning the straight segment into a gentle arc.
+ * - A baseline that already has interior waypoints has each interior point
+ *   shifted perpendicular by `displacement` (endpoints pinned), so multi-bend
+ *   routed edges separate too.
+ */
+export function separatedSplinePoints(points: Vec[], displacement: number): Vec[] {
+  if (displacement === 0 || points.length < 2) return points;
+  const start = points[0]!;
+  const end = points[points.length - 1]!;
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
   const len = Math.hypot(dx, dy);
-  if (len === 0) return { x: point.x, y: point.y };
+  if (len === 0) return points;
+  // Perpendicular unit vector to the baseline.
   const px = -dy / len;
   const py = dx / len;
-  return { x: point.x + px * offset, y: point.y + py * offset };
+
+  if (points.length === 2) {
+    // Insert a single bowed midpoint between the two anchored endpoints.
+    const mx = (start.x + end.x) / 2 + px * displacement;
+    const my = (start.y + end.y) / 2 + py * displacement;
+    return [start, { x: mx, y: my }, end];
+  }
+
+  // Shift each interior waypoint perpendicular by `displacement`, leaving the
+  // endpoints pinned on their node boundaries.
+  const out: Vec[] = [start];
+  for (let i = 1; i < points.length - 1; i++) {
+    const p = points[i]!;
+    out.push({ x: p.x + px * displacement, y: p.y + py * displacement });
+  }
+  out.push(end);
+  return out;
 }
 
 function makeLine(points: Vec[], style: Style): Shape {
@@ -298,6 +418,85 @@ function makeLine(points: Vec[], style: Style): Shape {
     points: points.map<[number, number]>((p) => [p.x, p.y]),
     style,
   };
+}
+
+/**
+ * Convert a polyline of ≥ 3 control points into a smooth cubic-Bezier `<path>`
+ * via Catmull-Rom-to-Bezier interpolation. The resulting curve passes through
+ * every input point; only the inter-point segments curve to remove the sharp
+ * corners a raw polyline would have.
+ *
+ * Algorithm: for each segment p[i] → p[i+1], the two cubic control points are
+ *   cp1 = p[i]   + (p[i+1] - p[i-1]) * t
+ *   cp2 = p[i+1] - (p[i+2] - p[i])   * t
+ * where the "mirror" boundary convention puts p[-1] = p[0] and p[n] = p[n-1]
+ * (so endpoints behave like straight tangents). `t = 1/6` matches the standard
+ * Catmull-Rom-to-Bezier conversion with unit tension.
+ *
+ * The path is `M <p0> C <cp1>,<cp2>,<p1> S <cp2>,<p2> ...` — we emit a fresh
+ * `C` per segment instead of `S` because each segment computes its own cp1
+ * (not the reflection of the previous cp2).
+ */
+function makeBezierPath(points: Vec[], style: Style): Shape {
+  const n = points.length;
+  // Defensive: callers gate on `points.length >= 3`, but keep the math safe.
+  if (n < 2) {
+    return {
+      type: 'path',
+      d: n === 1 ? `M ${points[0]!.x} ${points[0]!.y}` : '',
+      style,
+    };
+  }
+  if (n === 2) {
+    const a = points[0]!;
+    const b = points[1]!;
+    return { type: 'path', d: `M ${a.x} ${a.y} L ${b.x} ${b.y}`, style };
+  }
+
+  const T = 1 / 6;
+  const parts: string[] = [`M ${fmt(points[0]!.x)} ${fmt(points[0]!.y)}`];
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = points[i]!;
+    const p1 = points[i + 1]!;
+    const pPrev = i === 0 ? p0 : points[i - 1]!;
+    const pNext = i + 2 >= n ? p1 : points[i + 2]!;
+    const cp1x = p0.x + (p1.x - pPrev.x) * T;
+    const cp1y = p0.y + (p1.y - pPrev.y) * T;
+    const cp2x = p1.x - (pNext.x - p0.x) * T;
+    const cp2y = p1.y - (pNext.y - p0.y) * T;
+    parts.push(
+      `C ${fmt(cp1x)} ${fmt(cp1y)}, ${fmt(cp2x)} ${fmt(cp2y)}, ${fmt(p1.x)} ${fmt(p1.y)}`,
+    );
+  }
+  return { type: 'path', d: parts.join(' '), style };
+}
+
+/**
+ * Tangent reference point for the START endpoint of the curve produced by
+ * `makeBezierPath` — i.e. a point P such that (P - points[0]) is parallel to
+ * B'(0). With our mirror boundary, that direction is simply (p1 - p0), so we
+ * return p1. Returned as a Vec the marker module can consume as its `prev`
+ * argument (it computes `unitFrom(prev, end)`).
+ */
+function bezierTangentAtStart(points: Vec[]): Vec {
+  return { x: points[1]!.x, y: points[1]!.y };
+}
+
+/**
+ * Tangent reference point for the END endpoint. With our mirror boundary,
+ * B'(1) is parallel to (p[N-1] - p[N-2]); the marker wants a point such that
+ * (end - prev) is the tangent, so we return p[N-2].
+ */
+function bezierTangentAtEnd(points: Vec[]): Vec {
+  const i = points.length - 2;
+  return { x: points[i]!.x, y: points[i]!.y };
+}
+
+/** Trim trailing zeros so path strings stay readable in golden diffs. */
+function fmt(n: number): string {
+  // Round to 6 decimals to avoid float noise in serialized goldens.
+  const r = Math.round(n * 1e6) / 1e6;
+  return String(r);
 }
 
 export function rectClip(

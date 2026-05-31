@@ -42,8 +42,11 @@ export interface EdgeAttrs {
    *   the name.
    * - `'dotted'` — short-dash dasharray (`2,2`).
    * - `'bold'` — thicker stroke with no dasharray.
+   * - `'hidden'` — PlantUML's invisible connector; rendered as a plain solid
+   *   line by the current renderer (the layout-only hint is preserved but not
+   *   yet suppressed visually).
    */
-  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold';
+  lineStyle?: 'solid' | 'dashed' | 'dotted' | 'bold' | 'hidden';
   /**
    * Per-edge text colour override for the label, mapped from the
    * `text:<colorName>` token of an inline `#<styleBlock>`.

@@ -397,7 +397,8 @@ end note
 caller -> server : conReq
 hnote over caller : idle
 caller <- server : conConf
-rnote over server "r" as rectangle
+rnote over server
+"r" as rectangle
 "h" as hexagon
 endrnote
 rnote over server
@@ -430,9 +431,9 @@ Bob -> Alice : hello
   {
     title: "35. With `/` (notes aligned)",
     source: `@startuml
+!pragma teoz true
 note over Alice : initial state of Alice
-/
-note over Bob : initial state of Bob
+/ note over Bob : initial state of Bob
 Bob -> Alice : hello
 @enduml`,
   },
@@ -442,9 +443,7 @@ Bob -> Alice : hello
 participant Alice
 participant "The **Famous** Bob" as Bob
 Alice -> Bob : hello --there--
-...
-Some ~~long delay~~
-...
+...Some ~~long delay~~...
 Bob -> Alice : ok
 note left
 This is **bold**
@@ -698,12 +697,10 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
     title: '55. Anchors and Duration',
     source: `@startuml
 !pragma teoz true
-{start}
-Alice -> Bob : start doing things during duration
+{start} Alice -> Bob : start doing things during duration
 Bob -> Max : something
 Max -> Bob : something else
-{end}
-Bob -> Alice : finish
+{end} Bob -> Alice : finish
 {start} <-> {end} : some time
 @enduml`,
   },
@@ -769,7 +766,8 @@ Bob -> Alice: Authentication Response
   {
     title: '63. More information on titles #3',
     source: `@startuml
-title <u>Simple</u> communication example on <i>several</i> lines and using <font color=red>html</font>
+title
+<u>Simple</u> communication example on <i>several</i> lines and using <font color=red>html</font>
 This is hosted by <img:sourceforge.jpg>
 end title
 Alice -> Bob: Authentication Request
@@ -1110,11 +1108,9 @@ Alice -> Bob : hello
     title: '81. Color a group message',
     source: `@startuml
 Alice -> Bob: Authentication Request
-alt#Gold #LightBlue
-Successful case
+alt#Gold #LightBlue Successful case
 Bob -> Alice: Authentication Accepted
-else #Pink
-Failure
+else #Pink Failure
 Bob -> Alice: Authentication Rejected
 end
 @enduml`,

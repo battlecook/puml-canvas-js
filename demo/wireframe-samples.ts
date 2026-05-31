@@ -484,7 +484,7 @@ item **test list 1**
 This is a text|[This is my button]|This is another text
 "A field"|"Another long Field"|[A button]
 <<folder
-..............
+............
 .XXXXX......
 .X...X......
 .XXXXXXXXXX.
@@ -493,7 +493,7 @@ This is a text|[This is my button]|This is another text
 .X........X.
 .X........X.
 .XXXXXXXXXX.
-..............
+............
 >>|<color:blue>other folder|<<folder>>
 ^Droplist^
 }
@@ -605,11 +605,10 @@ failed, sorry
   {
     title: '33. Include Salt "on activity diagram"',
     source: `@startuml
-!unquoted procedure SALT($x)
-"{{salt %invoke_procedure("_"+$x) }}" as $x
-!endprocedure
-
-!procedure _choose()
+(*) --> "choose"
+note right
+{{
+salt
 {+
 <b>an example
 choose one option
@@ -617,33 +616,42 @@ choose one option
 ()two
 [ok]
 }
-!endprocedure
-
-!procedure _wait()
+}}
+end note
+"choose" -right-> "wait"
+note right
+{{
+salt
 {+
 <b>please wait
 operation in progress <&clock>
 [cancel]
 }
-!endprocedure
-
-!procedure _success()
+}}
+end note
+"wait" -right-> "success"
+note right
+{{
+salt
 {+
 <b>success
 congratulations!
 [ok]
 }
-!endprocedure
-
-!procedure _error()
+}}
+end note
+"wait" -down-> "error"
+note right
+{{
+salt
 {+
 <b>error
 failed, sorry
 [ok]
 }
-!endprocedure
-
-(*) --> SALT(choose) -right-> SALT(wait) wait -right-> SALT(success) wait -down-> SALT(error)
+}}
+end note
+"success" --> (*)
 @enduml`,
   },
   {

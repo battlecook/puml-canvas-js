@@ -312,10 +312,12 @@ Y1 -[#blue,bold]-> Y2
     title: '20. Change head or tail of arrow line',
     source: `@startuml
 state a
-a -> b : -> c
-x-> d : x-> e
-->o f : ->o
-g x->o h : x->o
+state b
+state c
+state d
+a ->o b
+a x-> c
+a x->o d
 @enduml`,
   },
   {
@@ -333,12 +335,12 @@ end note
   {
     title: '22. Note',
     source: `@startuml
-state start <<start>>
-start -> A
-note left of start : this is a short note on start state
-end <<end>>
-A -> end
-note right of end
+state "Start" as st <<start>>
+st --> A
+note left of st : this is a short note on start state
+state "End" as en <<end>>
+A --> en
+note right of en
   note on end
 end note
 @enduml`,

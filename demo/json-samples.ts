@@ -241,8 +241,7 @@ J -> Database
     source: `@startuml
 state "A" as stateA
 state "C" as stateC
-{
-state B
+state B {
 }
 json J {
 "fruit":"Apple",

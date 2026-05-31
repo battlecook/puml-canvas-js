@@ -7,3 +7,4 @@ coverage/
 .idea/
 .vscode/
 .claude/
+tools/.puml-cache/

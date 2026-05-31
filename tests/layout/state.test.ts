@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { compile } from '../../src/index.js';
+import { separatedSplinePoints } from '../../src/layout/common/edges.js';
 import type {
   CircleShape,
   LineShape,
+  PathShape,
   PolygonShape,
   RectShape,
   Shape,
@@ -690,5 +692,694 @@ join2 --> [*] : from join\\nto end
     // the name on these pseudo-states.
     expect(ts.find((t) => t.text === 'fork1')).toBeUndefined();
     expect(ts.find((t) => t.text === 'join2')).toBeUndefined();
+  });
+});
+
+describe('state layout — edge-label collision avoidance (Phase 1 Step D3)', () => {
+  // A state with a long transition label that would, at the polyline midpoint,
+  // visually sit near a nearby state box. With Step D3 the engine slides the
+  // labelBox off-midpoint so the rendered text doesn't overlap any node.
+  const LONG_LABEL_SRC = [
+    '@startuml',
+    '[*] --> Open',
+    'Open --> Closed : a very long transition label',
+    'Closed --> Archived',
+    '@enduml',
+  ].join('\n');
+
+  function rectFor(scene: ReturnType<typeof compile>, name: string): RectShape | undefined {
+    const ts = scene.children.filter((s): s is TextShape => s.type === 'text');
+    const rs = scene.children.filter((s): s is RectShape => s.type === 'rect');
+    const t = ts.find((tt) => tt.text === name);
+    if (!t) return undefined;
+    return rs.find(
+      (r) => t.x >= r.x && t.x <= r.x + r.w && t.y >= r.y && t.y <= r.y + r.h,
+    );
+  }
+
+  it('keeps long transition labels clear of unrelated state rectangles', () => {
+    const scene = compile(LONG_LABEL_SRC);
+    const ts = scene.children.filter((s): s is TextShape => s.type === 'text');
+    const label = ts.find((t) => t.text === 'a very long transition label');
+    expect(label).toBeDefined();
+
+    // The label's centre point must not fall inside the rectangle of an
+    // unrelated state (here, "Archived" — Closed is the edge endpoint
+    // and Open is too, but Archived sits below Closed and could overlap
+    // the polyline midpoint when the label is long).
+    const archivedRect = rectFor(scene, 'Archived');
+    expect(archivedRect).toBeDefined();
+    const inside =
+      label!.x >= archivedRect!.x &&
+      label!.x <= archivedRect!.x + archivedRect!.w &&
+      label!.y >= archivedRect!.y &&
+      label!.y <= archivedRect!.y + archivedRect!.h;
+    expect(inside).toBe(false);
+  });
+
+  it('does not regress short labels when they already fit at the midpoint', () => {
+    // Single short edge label between two well-separated states — the
+    // engine should choose the midpoint and the text should sit roughly
+    // halfway between the two endpoints.
+    const src = [
+      '@startuml',
+      '[*] --> A',
+      'A --> B : go',
+      '@enduml',
+    ].join('\n');
+    const scene = compile(src);
+    const ts = scene.children.filter((s): s is TextShape => s.type === 'text');
+    const a = ts.find((t) => t.text === 'A');
+    const b = ts.find((t) => t.text === 'B');
+    const go = ts.find((t) => t.text === 'go');
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    expect(go).toBeDefined();
+    // 'go' sits vertically between A and B.
+    expect(go!.y).toBeGreaterThan(a!.y);
+    expect(go!.y).toBeLessThan(b!.y);
+  });
+});
+
+describe('state layout — bezier edge curves (Phase 1 Step D1)', () => {
+  // A direct A→C edge alongside A→B→C makes A→C span two ranks, so
+  // sugiyama threads it through a dummy waypoint. The engine then flags
+  // that route as `curve: 'bezier'`, and the flat state renderer emits a
+  // smooth cubic-Bezier `<path>` instead of a sharp-cornered `<polyline>`.
+  const MULTI_RANK_SRC = [
+    '@startuml',
+    '[*] --> A',
+    'A --> B',
+    'B --> C',
+    'A --> C',
+    '@enduml',
+  ].join('\n');
+
+  function paths(shapes: Shape[]): PathShape[] {
+    return shapes.filter((s): s is PathShape => s.type === 'path');
+  }
+
+  it('emits a path shape for the multi-rank A→C edge', () => {
+    const scene = compile(MULTI_RANK_SRC);
+    const ps = paths(scene.children);
+    // Exactly one multi-rank edge → exactly one bezier path. (Direct
+    // single-rank edges stay as `<line>` shapes.)
+    expect(ps.length).toBe(1);
+    const d = ps[0]!.d;
+    // Bezier path starts with `M` and contains at least one `C` command.
+    expect(d.startsWith('M ')).toBe(true);
+    expect(d).toMatch(/ C /);
+  });
+
+  it('keeps single-rank edges as straight lines (no path shape)', () => {
+    // A linear chain has no multi-rank edges; every transition is a
+    // 2-point straight line. The flat renderer must therefore emit zero
+    // `<path>` shapes.
+    const src = [
+      '@startuml',
+      '[*] --> A',
+      'A --> B',
+      'B --> C',
+      '@enduml',
+    ].join('\n');
+    const scene = compile(src);
+    expect(paths(scene.children).length).toBe(0);
+  });
+
+  it('positions the arrow marker tip at the end of the bezier path', () => {
+    // The end-marker polyline's middle vertex is the arrow tip. For our
+    // curve renderer, the tip must coincide with the curve's last control
+    // point (the end of the polyline's last `C` command).
+    const scene = compile(MULTI_RANK_SRC);
+    const ps = paths(scene.children);
+    expect(ps.length).toBe(1);
+    const d = ps[0]!.d;
+    // Last `C cp1, cp2, endX endY` triple — grab `endX endY`.
+    const lastC = d.lastIndexOf(' C ');
+    expect(lastC).toBeGreaterThan(0);
+    const tail = d.slice(lastC + 3).split(',').pop()!.trim();
+    const [endXStr, endYStr] = tail.split(/\s+/);
+    const endX = Number(endXStr);
+    const endY = Number(endYStr);
+
+    // Find the arrow head polyline whose middle vertex is closest to the
+    // curve end. The marker polyline has 3 points `[a1, end, a2]`, so the
+    // middle point should match (endX, endY).
+    const polys = scene.children.filter(
+      (s): s is { type: 'polyline'; points: Array<[number, number]> } & Shape =>
+        s.type === 'polyline',
+    );
+    const matching = polys.find((p) => {
+      const mid = p.points[1];
+      if (!mid) return false;
+      return Math.abs(mid[0] - endX) < 1e-3 && Math.abs(mid[1] - endY) < 1e-3;
+    });
+    expect(matching).toBeDefined();
+  });
+});
+
+describe('state layout — parallel edges (flat layered path)', () => {
+  // Two transitions between the same pair, with different labels. Before the
+  // F2a edge-identity refactor the engine keyed edges by `from->to`, so one of
+  // these collapsed onto the other and only a single label survived. Now both
+  // edges flow through the layered path as distinct entries.
+  const PARALLEL = `@startuml
+NewValueSelection --> NewValuePreview : EvNewValue
+NewValuePreview --> NewValueSelection : EvNewValueRejected
+NewValuePreview --> NewValueSelection : EvNewValueSaved
+@enduml`;
+
+  it('renders both labels of a doubled NewValuePreview -> NewValueSelection edge', () => {
+    const scene = compile(PARALLEL);
+    const ts = texts(scene.children);
+
+    const rejected = ts.find((t) => t.text === 'EvNewValueRejected');
+    const saved = ts.find((t) => t.text === 'EvNewValueSaved');
+
+    // Both parallel-edge labels must be present (the motivating failure was
+    // one of these disappearing entirely).
+    expect(rejected).toBeDefined();
+    expect(saved).toBeDefined();
+
+    // Their geometry must differ — distinct lateral offsets / label boxes mean
+    // the two labels do not stack at the same coordinate.
+    const samePoint =
+      Math.abs(rejected!.x - saved!.x) < 1e-6 &&
+      Math.abs(rejected!.y - saved!.y) < 1e-6;
+    expect(samePoint).toBe(false);
+
+    // And separated enough to be visually legible (vertical row gap or a wide
+    // horizontal pull-apart).
+    const verticalSep = Math.abs(rejected!.y - saved!.y);
+    const horizontalSep = Math.abs(rejected!.x - saved!.x);
+    expect(verticalSep > 12 || horizontalSep > 40).toBe(true);
+  });
+});
+
+describe('state layout — composite transition routing + label placement (unified pipeline)', () => {
+  function paths(shapes: Shape[]): PathShape[] {
+    return shapes.filter((s): s is PathShape => s.type === 'path');
+  }
+  function lines(shapes: Shape[]): LineShape[] {
+    return shapes.filter((s): s is LineShape => s.type === 'line');
+  }
+  // First (M) point of a bezier `d` string.
+  function pathStart(d: string): { x: number; y: number } {
+    const m = d.match(/M\s+([-\d.]+)\s+([-\d.]+)/)!;
+    return { x: Number(m[1]), y: Number(m[2]) };
+  }
+  function pathJoin(d: string): { x: number; y: number } | null {
+    const firstC = d.indexOf(' C ');
+    if (firstC < 0) return null;
+    const nextC = d.indexOf(' C ', firstC + 3);
+    const seg = nextC < 0 ? d.slice(firstC + 3) : d.slice(firstC + 3, nextC);
+    const parts = seg.split(',').pop()!.trim().split(/\s+/);
+    return { x: Number(parts[0]), y: Number(parts[1]) };
+  }
+
+  // The canonical PlantUML composite sample. Braces on their own lines so the
+  // parser builds the real composite nesting (NotShooting / Configuring with
+  // children, NewValuePreview nested inside Configuring) and the diagram flows
+  // through the nested/composite layout path this pipeline drives. (Inline
+  // `state X { ... }` on one line parses flat — a separate parser limitation.)
+  const CANONICAL = `@startuml
+[*] --> NotShooting
+state NotShooting {
+  [*] --> Idle
+  Idle --> Configuring : EvConfig
+  Configuring --> Idle : EvConfig
+}
+state Configuring {
+  [*] --> NewValueSelection
+  NewValueSelection --> NewValuePreview : EvNewValue
+  NewValuePreview --> NewValueSelection : EvNewValueRejected
+  NewValuePreview --> NewValueSelection : EvNewValueSaved
+  state NewValuePreview {
+    State1 -> State2
+  }
+}
+@enduml`;
+
+  it('places no edge-label box inside any leaf node box', () => {
+    const scene = compile(CANONICAL);
+    const rs = rects(scene.children);
+    const ts = texts(scene.children);
+
+    // Leaf node boxes = rects that do NOT strictly contain another rect
+    // (composite frames DO contain children and legitimately host edge labels).
+    const isContainer = (r: RectShape): boolean =>
+      rs.some(
+        (o) =>
+          o !== r &&
+          o.x > r.x &&
+          o.y > r.y &&
+          o.x + o.w < r.x + r.w &&
+          o.y + o.h < r.y + r.h,
+      );
+    const leaves = rs.filter((r) => !isContainer(r));
+
+    const LABEL_HALF_W = 30;
+    const LABEL_HALF_H = 7;
+    const overlapArea = (
+      a: { x: number; y: number; w: number; h: number },
+      r: RectShape,
+    ): number => {
+      const ox = Math.max(0, Math.min(a.x + a.w, r.x + r.w) - Math.max(a.x, r.x));
+      const oy = Math.max(0, Math.min(a.y + a.h, r.y + r.h) - Math.max(a.y, r.y));
+      return ox * oy;
+    };
+
+    // Edge labels = texts whose center is NOT inside a LEAF node box (leaf
+    // labels — state names — sit inside their leaf box).
+    const insideLeaf = (x: number, y: number): boolean =>
+      leaves.some((r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
+    const edgeLabels = ts.filter((t) => !insideLeaf(t.x, t.y));
+    expect(edgeLabels.length).toBeGreaterThan(0);
+    for (const t of edgeLabels) {
+      const lb = {
+        x: t.x - LABEL_HALF_W,
+        y: t.y - LABEL_HALF_H,
+        w: LABEL_HALF_W * 2,
+        h: LABEL_HALF_H * 2,
+      };
+      for (const r of leaves) {
+        expect(overlapArea(lb, r)).toBeLessThan(LABEL_HALF_W * LABEL_HALF_H * 0.8);
+      }
+    }
+  });
+
+  it('separates the two NewValuePreview -> NewValueSelection labels', () => {
+    const scene = compile(CANONICAL);
+    const ts = texts(scene.children);
+    const rejected = ts.find((t) => t.text === 'EvNewValueRejected');
+    const saved = ts.find((t) => t.text === 'EvNewValueSaved');
+    expect(rejected).toBeDefined();
+    expect(saved).toBeDefined();
+    const vsep = Math.abs(rejected!.y - saved!.y);
+    const hsep = Math.abs(rejected!.x - saved!.x);
+    expect(vsep > 12 || hsep > 60).toBe(true);
+  });
+
+  it('places the three Ev* labels clear of each other and of the NewValueSelection node', () => {
+    // Direct-coordinate gate (the real fidelity check — the structural harness
+    // alone fooled us once). We model each Ev* label by its REAL rendered box
+    // (chars × fontSize × 0.6 wide, fontSize × 1.2 tall, anchored on its centred
+    // <text>), then assert (a) no two of the three label boxes overlap, and
+    // (b) none overlaps the NewValueSelection leaf node box.
+    const scene = compile(CANONICAL);
+    const ts = texts(scene.children);
+    const rs = rects(scene.children);
+
+    const FONT = 11; // EDGE_LABEL_FONT in nested.ts
+    const CHAR_W = 0.6; // measureText's AVG_CHAR_W_RATIO
+    const labelBox = (t: TextShape): {
+      x: number;
+      y: number;
+      x2: number;
+      y2: number;
+    } => {
+      const fs = t.font?.size ?? FONT;
+      const w = t.text.length * fs * CHAR_W;
+      const h = fs * 1.2;
+      return { x: t.x - w / 2, y: t.y - h / 2, x2: t.x + w / 2, y2: t.y + h / 2 };
+    };
+    const overlaps = (
+      a: { x: number; y: number; x2: number; y2: number },
+      b: { x: number; y: number; x2: number; y2: number },
+    ): boolean => {
+      const ox = Math.min(a.x2, b.x2) - Math.max(a.x, b.x);
+      const oy = Math.min(a.y2, b.y2) - Math.max(a.y, b.y);
+      return ox > 1 && oy > 1; // >1px on both axes = real overlap
+    };
+
+    const names = ['EvNewValue', 'EvNewValueRejected', 'EvNewValueSaved'];
+    const evBoxes = names.map((n) => {
+      const t = ts.find((x) => x.text === n);
+      expect(t, `label ${n} should be rendered`).toBeDefined();
+      return labelBox(t!);
+    });
+
+    // (a) No two of the three label boxes overlap.
+    for (let i = 0; i < evBoxes.length; i++) {
+      for (let j = i + 1; j < evBoxes.length; j++) {
+        expect(
+          overlaps(evBoxes[i]!, evBoxes[j]!),
+          `${names[i]} overlaps ${names[j]}`,
+        ).toBe(false);
+      }
+    }
+
+    // (b) None overlaps the NewValueSelection leaf node box. The node box is the
+    // leaf rect (not strictly containing another rect) that hosts the
+    // "NewValueSelection" title text.
+    const nvText = ts.find((t) => t.text === 'NewValueSelection');
+    expect(nvText).toBeDefined();
+    const isContainer = (r: RectShape): boolean =>
+      rs.some(
+        (o) =>
+          o !== r &&
+          o.x > r.x &&
+          o.y > r.y &&
+          o.x + o.w < r.x + r.w &&
+          o.y + o.h < r.y + r.h,
+      );
+    const nvRect = rs
+      .filter((r) => !isContainer(r))
+      .find(
+        (r) =>
+          nvText!.x >= r.x &&
+          nvText!.x <= r.x + r.w &&
+          nvText!.y >= r.y &&
+          nvText!.y <= r.y + r.h,
+      );
+    expect(nvRect, 'NewValueSelection leaf box should be found').toBeDefined();
+    const nvBox = {
+      x: nvRect!.x,
+      y: nvRect!.y,
+      x2: nvRect!.x + nvRect!.w,
+      y2: nvRect!.y + nvRect!.h,
+    };
+    for (let i = 0; i < evBoxes.length; i++) {
+      expect(
+        overlaps(evBoxes[i]!, nvBox),
+        `${names[i]} overlaps NewValueSelection node`,
+      ).toBe(false);
+    }
+  });
+
+  it('bows the bidirectional NewValueSelection <-> NewValuePreview pair to opposite sides', () => {
+    const scene = compile(CANONICAL);
+    // The three transitions between this pair are emitted as bowed bezier
+    // paths. Find the curves for this node pair and assert their interior
+    // join points fall on opposite sides of the start->end baseline.
+    const ps = paths(scene.children).map((p) => p.d);
+    const offsets: number[] = [];
+    for (const d of ps) {
+      const start = pathStart(d);
+      const join = pathJoin(d);
+      if (!join) continue;
+      // recover end: last coordinate pair in the string
+      const nums = d.match(/-?[\d.]+/g)!.map(Number);
+      const end = { x: nums[nums.length - 2]!, y: nums[nums.length - 1]! };
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const px = -dy / len;
+      const py = dx / len;
+      const mx = (start.x + end.x) / 2;
+      const my = (start.y + end.y) / 2;
+      offsets.push((join.x - mx) * px + (join.y - my) * py);
+    }
+    // At least one pair of bowed curves on opposite sides (one +, one -).
+    const hasPos = offsets.some((o) => o > 1);
+    const hasNeg = offsets.some((o) => o < -1);
+    expect(hasPos && hasNeg).toBe(true);
+  });
+
+  it('keeps each Ev* label hugging a transition arc (not orphaned in the margin)', () => {
+    // Orphan-regression gate. The previous fix flung parallel-edge labels out to
+    // fixed far-margin positions, visually disconnected from their edges. The
+    // labels must instead ride their own bowed arcs: each Ev* label centre must
+    // sit within a small tolerance of SOME point on an edge polyline (a bezier
+    // path or a straight line). We sample every edge stroke densely and assert
+    // the nearest sampled point to each label centre is close.
+    const scene = compile(CANONICAL);
+    const ts = texts(scene.children);
+
+    // Collect every edge stroke as a dense point sequence.
+    const strokes: Array<Array<{ x: number; y: number }>> = [];
+    for (const l of lines(scene.children)) {
+      strokes.push([{ x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }]);
+    }
+    for (const p of paths(scene.children)) {
+      const nums = p.d.match(/-?[\d.]+/g)!.map(Number);
+      const ctrl: Array<{ x: number; y: number }> = [];
+      for (let i = 0; i + 1 < nums.length; i += 2) ctrl.push({ x: nums[i]!, y: nums[i + 1]! });
+      strokes.push(ctrl);
+    }
+    // Linearly densify each stroke's control hull (the rendered curve lies
+    // inside the hull, so hull samples bound the true distance from above).
+    const samples: Array<{ x: number; y: number }> = [];
+    for (const s of strokes) {
+      for (let i = 1; i < s.length; i++) {
+        for (let k = 0; k <= 10; k++) {
+          const t = k / 10;
+          samples.push({
+            x: s[i - 1]!.x + (s[i]!.x - s[i - 1]!.x) * t,
+            y: s[i - 1]!.y + (s[i]!.y - s[i - 1]!.y) * t,
+          });
+        }
+      }
+    }
+    const nearestEdgeDist = (cx: number, cy: number): number => {
+      let best = Infinity;
+      for (const q of samples) {
+        const d = Math.hypot(cx - q.x, cy - q.y);
+        if (d < best) best = d;
+      }
+      return best;
+    };
+
+    const names = ['EvNewValue', 'EvNewValueRejected', 'EvNewValueSaved'];
+    for (const n of names) {
+      const t = ts.find((x) => x.text === n);
+      expect(t, `label ${n} should be rendered`).toBeDefined();
+      const d = nearestEdgeDist(t!.x, t!.y);
+      // 30px: the label centre rides just outboard of its own arc apex. A label
+      // flung to the far margin (the old regression) lands 100px+ from any edge.
+      expect(d, `${n} is ${d.toFixed(1)}px from the nearest edge — orphaned?`).toBeLessThan(30);
+    }
+  });
+
+  it('routes a straight edge around an intervening sibling node', () => {
+    // C sits geometrically between A and D in a single composite row, so the
+    // A -> D edge must detour around it rather than pass through it.
+    const ROUTE = `@startuml
+state Outer {
+  A -> B
+  B -> C
+  C -> D
+  A --> D : skip
+}
+@enduml`;
+    const scene = compile(ROUTE);
+    const rs = rects(scene.children);
+    // Identify leaf node boxes (those not strictly containing another rect).
+    const leaves = rs.filter(
+      (r) =>
+        !rs.some(
+          (o) =>
+            o !== r &&
+            o.x > r.x &&
+            o.y > r.y &&
+            o.x + o.w < r.x + r.w &&
+            o.y + o.h < r.y + r.h,
+        ),
+    );
+    // The A -> D edge: a bezier path (routed) OR a straight line. Gather every
+    // edge stroke (lines + path control points) and assert no interior sample
+    // of any stroke passes strictly through a leaf box that is not its endpoint.
+    const ls = lines(scene.children);
+    const strokes: Array<Array<{ x: number; y: number }>> = [];
+    for (const l of ls) strokes.push([{ x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }]);
+    for (const p of paths(scene.children)) {
+      const nums = p.d.match(/-?[\d.]+/g)!.map(Number);
+      const pts: Array<{ x: number; y: number }> = [];
+      for (let i = 0; i + 1 < nums.length; i += 2) pts.push({ x: nums[i]!, y: nums[i + 1]! });
+      strokes.push(pts);
+    }
+    const densify = (pts: Array<{ x: number; y: number }>) => {
+      const out: Array<{ x: number; y: number }> = [];
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1]!;
+        const b = pts[i]!;
+        const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 5));
+        for (let k = 0; k <= n; k++) {
+          out.push({ x: a.x + ((b.x - a.x) * k) / n, y: a.y + ((b.y - a.y) * k) / n });
+        }
+      }
+      return out;
+    };
+    const strictlyInside = (
+      pt: { x: number; y: number },
+      r: RectShape,
+    ): boolean => pt.x > r.x + 4 && pt.x < r.x + r.w - 4 && pt.y > r.y + 4 && pt.y < r.y + r.h - 4;
+
+    for (const stroke of strokes) {
+      if (stroke.length < 2) continue;
+      const dense = densify(stroke);
+      const first = stroke[0]!;
+      const last = stroke[stroke.length - 1]!;
+      const interior = dense.slice(1, -1);
+      for (const leaf of leaves) {
+        const isEndpoint =
+          (first.x >= leaf.x - 6 && first.x <= leaf.x + leaf.w + 6 &&
+            first.y >= leaf.y - 6 && first.y <= leaf.y + leaf.h + 6) ||
+          (last.x >= leaf.x - 6 && last.x <= leaf.x + leaf.w + 6 &&
+            last.y >= leaf.y - 6 && last.y <= leaf.y + leaf.h + 6);
+        if (isEndpoint) continue;
+        const through = interior.some((p) => strictlyInside(p, leaf));
+        expect(through).toBe(false);
+      }
+    }
+  });
+});
+
+describe('common edges — separatedSplinePoints (F2b helper)', () => {
+  it('returns the input unchanged for a zero displacement (single-edge case)', () => {
+    const base = [
+      { x: 0, y: 0 },
+      { x: 0, y: 100 },
+    ];
+    const out = separatedSplinePoints(base, 0);
+    // Same reference / same geometry — byte-identical straight edge.
+    expect(out).toBe(base);
+  });
+
+  it('keeps endpoints anchored and bows the interior perpendicular to the baseline', () => {
+    // Vertical baseline (0,0)->(0,100). A +10 displacement must push the
+    // inserted midpoint +10 along the perpendicular (+x), endpoints pinned.
+    const base = [
+      { x: 0, y: 0 },
+      { x: 0, y: 100 },
+    ];
+    const out = separatedSplinePoints(base, 10);
+    expect(out.length).toBe(3);
+    expect(out[0]).toEqual({ x: 0, y: 0 });
+    expect(out[2]).toEqual({ x: 0, y: 100 });
+    // Midpoint bowed out perpendicular to the downward baseline. The perp unit
+    // vector is (-dy, dx)/len = (-1, 0), so a +10 displacement lands at x=-10.
+    expect(out[1]!.x).toBeCloseTo(-10, 6);
+    expect(out[1]!.y).toBeCloseTo(50, 6);
+    // Magnitude of the bow equals |displacement|.
+    expect(Math.abs(out[1]!.x)).toBeCloseTo(10, 6);
+  });
+
+  it('bows opposite-signed displacements to opposite sides', () => {
+    const base = [
+      { x: 0, y: 0 },
+      { x: 0, y: 100 },
+    ];
+    const plus = separatedSplinePoints(base, 12);
+    const minus = separatedSplinePoints(base, -12);
+    // Same endpoints, mirror-image interior control point on opposite sides.
+    expect(plus[1]!.x).toBeCloseTo(-12, 6);
+    expect(minus[1]!.x).toBeCloseTo(12, 6);
+    expect(Math.sign(plus[1]!.x)).toBe(-Math.sign(minus[1]!.x));
+  });
+});
+
+describe('state layout — multi-edge spline separation (F2b)', () => {
+  function paths(shapes: Shape[]): PathShape[] {
+    return shapes.filter((s): s is PathShape => s.type === 'path');
+  }
+
+  // Parse the cubic-Bezier `d` string into its on-curve points: the initial
+  // `M` point plus the final point of every `C` segment. The interior control
+  // hull (the bowed midpoint) is reflected in the segment count.
+  function pathStartEnd(d: string): { start: [number, number]; end: [number, number] } {
+    const mMatch = d.match(/M\s+([-\d.]+)\s+([-\d.]+)/)!;
+    const start: [number, number] = [Number(mMatch[1]), Number(mMatch[2])];
+    const lastC = d.lastIndexOf(' C ');
+    const tail = d.slice(lastC + 3).split(',').pop()!.trim();
+    const [ex, ey] = tail.split(/\s+/);
+    return { start, end: [Number(ex), Number(ey)] };
+  }
+
+  // The "bow" of a 2-segment bezier (our N≥2 separated spline) is the
+  // perpendicular displacement of the shared interior point from the
+  // start→end baseline. We recover it from the join point of the two `C`
+  // commands (= the displaced midpoint).
+  function bowSignedOffset(d: string): number {
+    const { start, end } = pathStartEnd(d);
+    // First `C cp1, cp2, joinX joinY` — the join point is the displaced mid.
+    const firstC = d.indexOf(' C ');
+    const seg = d.slice(firstC + 3, d.indexOf(' C ', firstC + 3));
+    const join = seg.split(',').pop()!.trim().split(/\s+/);
+    const jx = Number(join[0]);
+    const jy = Number(join[1]);
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const len = Math.hypot(dx, dy) || 1;
+    // Perpendicular unit vector.
+    const px = -dy / len;
+    const py = dx / len;
+    const mx = (start[0] + end[0]) / 2;
+    const my = (start[1] + end[1]) / 2;
+    return (jx - mx) * px + (jy - my) * py;
+  }
+
+  const PARALLEL = [
+    '@startuml',
+    '[*] --> A',
+    'A --> B : fwd',
+    'A --> B : fwd2',
+    '@enduml',
+  ].join('\n');
+
+  const BIDIR = [
+    '@startuml',
+    '[*] --> A',
+    'A --> B : fwd',
+    'B --> A : back',
+    '@enduml',
+  ].join('\n');
+
+  it('draws two parallel A→B edges as geometrically distinct splines', () => {
+    const scene = compile(PARALLEL);
+    const ps = paths(scene.children);
+    // The two parallel A↔B edges each become a separated bezier path.
+    expect(ps.length).toBe(2);
+    const off0 = bowSignedOffset(ps[0]!.d);
+    const off1 = bowSignedOffset(ps[1]!.d);
+    // Their interior control points are displaced from the baseline by a
+    // clearly non-trivial gap (not just label offsets) — distinct PATHS.
+    expect(Math.abs(off0 - off1)).toBeGreaterThan(10);
+  });
+
+  it('keeps parallel edge endpoints anchored on the shared node boundary', () => {
+    const scene = compile(PARALLEL);
+    const ps = paths(scene.children);
+    expect(ps.length).toBe(2);
+    const a = pathStartEnd(ps[0]!.d);
+    const b = pathStartEnd(ps[1]!.d);
+    // Both edges share the same anchored start/end on the node boundaries —
+    // only the interior bows out.
+    expect(a.start[0]).toBeCloseTo(b.start[0], 6);
+    expect(a.start[1]).toBeCloseTo(b.start[1], 6);
+    expect(a.end[0]).toBeCloseTo(b.end[0], 6);
+    expect(a.end[1]).toBeCloseTo(b.end[1], 6);
+  });
+
+  it('bows a bidirectional A↔B pair to opposite sides of the baseline', () => {
+    const scene = compile(BIDIR);
+    const ps = paths(scene.children);
+    expect(ps.length).toBe(2);
+    const off0 = bowSignedOffset(ps[0]!.d);
+    const off1 = bowSignedOffset(ps[1]!.d);
+    // Opposite-signed perpendicular displacements → the two arrows no longer
+    // overlap on the same line (problem #4). Both bows are non-trivial.
+    expect(Math.sign(off0)).toBe(-Math.sign(off1));
+    expect(Math.abs(off0)).toBeGreaterThan(4);
+    expect(Math.abs(off1)).toBeGreaterThan(4);
+  });
+
+  it('leaves a single edge straight (no curve injected, endpoints on boundary)', () => {
+    const src = [
+      '@startuml',
+      '[*] --> A',
+      'A --> B : only',
+      '@enduml',
+    ].join('\n');
+    const scene = compile(src);
+    // A single (non-multi-rank) edge stays a straight <line>: no path bowing.
+    expect(paths(scene.children).length).toBe(0);
+    const lines = scene.children.filter(
+      (s): s is LineShape => s.type === 'line',
+    );
+    // The A→B edge is a straight vertical line between the two node columns
+    // (same x for both endpoints since A and B stack vertically).
+    const ab = lines.find((l) => Math.abs(l.x1 - l.x2) < 1e-6 && l.y2 > l.y1 + 20);
+    expect(ab).toBeDefined();
   });
 });

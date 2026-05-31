@@ -103,10 +103,9 @@ if (condition A) then (yes)
 :Text 1;
 elseif (condition B) then (yes)
 :Text 2;
-stop (no)
+stop
 elseif (condition C) then (yes)
 :Text 3;
-(no)
 elseif (condition D) then (yes)
 :Text 4;
 else (nothing)
@@ -161,32 +160,27 @@ if (condition?) then
 :error;
 stop
 endif
-:action;
-<<#palegreen>>
+:action; <<#palegreen>>
 @enduml`,
   },
   {
     title: '14. Conditional with stop on action #2',
     source: `@startuml
 if (condition?) then
-:error;
-<<#pink>>
+:error; <<#pink>>
 kill
 endif
-:action;
-<<#palegreen>>
+:action; <<#palegreen>>
 @enduml`,
   },
   {
     title: '15. Conditional with stop on action #3',
     source: `@startuml
 if (condition?) then
-:error;
-<<#pink>>
+:error; <<#pink>>
 detach
 endif
-:action;
-<<#palegreen>>
+:action; <<#palegreen>>
 @enduml`,
   },
   {
@@ -220,8 +214,7 @@ start
 repeat
 :Test something;
 if (Something went wrong?) then (no)
-:OK;
-<<#palegreen>>
+:OK; <<#palegreen>>
 break
 endif
 ->NOK;
@@ -349,7 +342,7 @@ fork
 :action 1;
 fork again
 :action 2;
-end end merge
+end merge
 stop
 @enduml`,
   },
@@ -414,11 +407,14 @@ end
   {
     title: '32. Input split (multi-start) #1',
     source: `@startuml
-split -[hidden]->
+split
+-[hidden]->
 :A;
-split again -[hidden]->
+split again
+-[hidden]->
 :B;
-split again -[hidden]->
+split again
+-[hidden]->
 :C;
 end split
 :D;
@@ -427,12 +423,15 @@ end split
   {
     title: '33. Input split (multi-start) #2',
     source: `@startuml
-split -[hidden]->
+split
+-[hidden]->
 :A;
-split again -[hidden]->
+split again
+-[hidden]->
 :a;
 :b;
-split again -[hidden]->
+split again
+-[hidden]->
 (Z)
 end split
 :D;
@@ -469,7 +468,7 @@ split again
 (Z)
 detach
 split again
-end split again
+:d;
 stop
 end split
 @enduml`,
@@ -497,8 +496,7 @@ start
 repeat
 :Enter data;
 :Submit;
-backward
-:Warning;
+backward:Warning;
 note right: Note
 repeat while (Valid?) is (No) not (Yes)
 stop
@@ -515,8 +513,7 @@ This is my note
 //Creole test//
 end note
 :Ready;
-:HelloWorld(i);
-<<output>>
+:HelloWorld(i); <<output>>
 :Hello-Sent;
 }
 @enduml`,
@@ -527,10 +524,8 @@ end note
 start
 :starting progress;
 :reading configuration files
-These files should be edited at this point!;
-<<#HotPink>>
-:ending of the process;
-<<#AAAAAA>>
+These files should be edited at this point!; <<#HotPink>>
+:ending of the process; <<#AAAAAA>>
 @enduml`,
   },
   {
@@ -538,8 +533,7 @@ These files should be edited at this point!;
     source: `@startuml
 start
 partition #red/white testPartition {
-:testActivity;
-<<#blue\\green>>
+:testActivity; <<#blue\\green>>
 }
 @enduml`,
   },
@@ -561,8 +555,7 @@ start
 repeat
 :Enter data;
 :Submit;
-backward
-:Warning;
+backward:Warning;
 repeat while (Valid?) is (No) not (Yes)
 stop
 @enduml`,
@@ -575,8 +568,7 @@ stop
 if (test) then
 -[#blue]->
 :foo2;
--[#green,dashed]->
-The text can also be on several lines and **very** long...;
+-[#green,dashed]-> The text can also be on\\nseveral lines and **very** long...;
 :foo3;
 else
 -[#black,dotted]->
@@ -630,8 +622,7 @@ if(d?)then(yes)
 -[#maroon,dashed]->
 else(no)
 -[#green]->
-:do something;
-<<continuous>>
+:do something; <<continuous>>
 -[#green]->
 endif
 -[#green;#maroon,dashed]->
@@ -643,8 +634,7 @@ endif
 -[#green;#maroon,dashed]->
 elseif(f?)then(yes)
 -[#orange]->
-:activity;
-<<continuous>>
+:activity; <<continuous>>
 -[#orange]->
 else(no)
 -[#blue,dashed;dotted]->
@@ -794,22 +784,18 @@ stop
 |#pink|Actor_For_red|
 start
 if (color?) is (red) then
-:**action red**;
-<<#pink>>
+:**action red**; <<#pink>>
 :foo1;
 else (not red)
 |#lightgray|Actor_For_no_red|
-:**action not red**;
-<<#lightgray>>
+:**action not red**; <<#lightgray>>
 :foo2;
 endif
 |Next_Actor|
-:foo3;
-<<#lightblue>>
+:foo3; <<#lightblue>>
 :foo4;
 |Final_Actor|
-:foo5;
-<<#palegreen>>
+:foo5; <<#palegreen>>
 stop
 @enduml`,
   },
@@ -875,8 +861,7 @@ stop
     title: '59. Emoji as action (with `icon` stereotype)',
     source: `@startuml
 while (<:cloud_with_rain:>)
-:<:umbrella:>;
-<<icon>>
+:<:umbrella:>; <<icon>>
 endwhile
 -<<icon>><:closed_umbrella:>
 @enduml`,
@@ -886,20 +871,13 @@ endwhile
     source: `@startuml
 start
 :SDL Shape;
-:input;
-<<input>>
-:output;
-<<output>>
-:procedure;
-<<procedure>>
-:load;
-<<load>>
-:save;
-<<save>>
-:continuous;
-<<continuous>>
-:task;
-<<task>>
+:input; <<input>>
+:output; <<output>>
+:procedure; <<procedure>>
+:load; <<load>>
+:save; <<save>>
+:continuous; <<continuous>>
+:task; <<task>>
 end
 @enduml`,
   },
@@ -907,37 +885,25 @@ end
     title: '61. SDL using stereotype #2',
     source: `@startuml
 :Ready;
-:next(o);
-<<procedure>>
+:next(o); <<procedure>>
 :Receiving;
 split
-:nak(i);
-<<input>>
-:ack(o);
-<<output>>
+:nak(i); <<input>>
+:ack(o); <<output>>
 split again
-:ack(i);
-<<input>>
-:next(o) on several lines;
-<<procedure>>
-:i := i + 1;
-<<task>>
-:ack(o);
-<<output>>
+:ack(i); <<input>>
+:next(o) on several lines; <<procedure>>
+:i := i + 1; <<task>>
+:ack(o); <<output>>
 split again
-:err(i);
-<<input>>
-:nak(o);
-<<output>>
+:err(i); <<input>>
+:nak(o); <<output>>
 split again
-:foo;
-<<save>>
+:foo; <<save>>
 split again
-:bar;
-<<load>>
+:bar; <<load>>
 split again
-:i > 5;
-<<continuous>>
+:i > 5; <<continuous>>
 stop
 end split
 :finish;
@@ -947,20 +913,13 @@ end split
     title: '62. UML Shape Example using Stereotype',
     source: `@startuml
 :action;
-:object;
-<<object>>
-:ObjectNode typed by signal;
-<<objectSignal>>
-:AcceptEventAction without TimeEvent trigger;
-<<acceptEvent>>
-:SendSignalAction;
-<<sendSignal>>
-:SendObjectAction with signal type;
-<<sendSignal>>
-:Trigger;
-<<trigger>>
-:\\t\\t\\t\\t\\t\\tAcceptEventAction \\t\\t\\t\\t\\t\\twith TimeEvent trigger;
-<<timeEvent>>
+:object; <<object>>
+:ObjectNode typed by signal; <<objectSignal>>
+:AcceptEventAction without TimeEvent trigger; <<acceptEvent>>
+:SendSignalAction; <<sendSignal>>
+:SendObjectAction with signal type; <<sendSignal>>
+:Trigger; <<trigger>>
+:\\t\\t\\t\\t\\t\\tAcceptEventAction \\t\\t\\t\\t\\t\\twith TimeEvent trigger; <<timeEvent>>
 :an action;
 @enduml`,
   },

@@ -171,8 +171,7 @@ DA - [First Component]
   {
     title: '16. Long description',
     source: `@startuml
-component comp1
-[
+component comp1 [
 This component has a long comment on several lines
 ]
 @enduml`,

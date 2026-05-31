@@ -240,9 +240,11 @@ Project starts 2020-07-01
   {
     title: '20. Milestone of maximum end of tasks',
     source: `@startgantt
-[Task1] requires 4 days then [Task1.1] requires 4 days
+[Task1] requires 4 days
+then [Task1.1] requires 4 days
 [Task1.2] starts at [Task1]'s end and requires 7 days
-[Task2] requires 5 days then [Task2.1] requires 4 days
+[Task2] requires 5 days
+then [Task2.1] requires 4 days
 [MaxTaskEnd] happens at [Task1.1]'s end
 [MaxTaskEnd] happens at [Task1.2]'s end
 [MaxTaskEnd] happens at [Task2.1]'s end
@@ -579,7 +581,8 @@ Project starts the 6th of July 2020
   {
     title: '48. Change first day of week',
     source: `@startgantt
-printscale weekly weeks starts on Sunday and must have at least 4 days
+printscale weekly
+weeks starts on Sunday and must have at least 4 days
 friday are closed
 saturday are closed
 Project starts the 1st of january 2025

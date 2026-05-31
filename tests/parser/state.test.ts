@@ -348,4 +348,102 @@ describe('state parser', () => {
     expect(labels).toContain('EvConfig');
     expect(labels).toContain('EvNewValue');
   });
+
+  describe('styled / directional transition arrows', () => {
+    it('parses a colour-only bracket `-[#color]->`', () => {
+      const a = ast('@startuml\nS1 -[#DD00AA]-> S2\n@enduml');
+      expect(a.transitions).toHaveLength(1);
+      const t = a.transitions[0]!;
+      expect(t.source).toBe('S1');
+      expect(t.target).toBe('S2');
+      expect(t.lineColor).toBe('#dd00aa');
+      expect(t.style).toBe('solid');
+    });
+
+    it('parses a direction prefix + colour bracket `-left[#color]->`', () => {
+      const a = ast('@startuml\nS1 -left[#yellow]-> S3\n@enduml');
+      expect(a.transitions).toHaveLength(1);
+      const t = a.transitions[0]!;
+      expect(t.target).toBe('S3');
+      expect(t.direction).toBe('left');
+      // Named PlantUML colour `#yellow` drops the `#` to a CSS colour name.
+      expect(t.lineColor).toBe('yellow');
+    });
+
+    it('parses direction + colour + style bracket `-up[#red,dashed]->`', () => {
+      const a = ast('@startuml\nS1 -up[#red,dashed]-> S4\n@enduml');
+      const t = a.transitions[0]!;
+      expect(t.direction).toBe('up');
+      expect(t.lineColor).toBe('red');
+      expect(t.lineStyle).toBe('dashed');
+      expect(t.style).toBe('dashed');
+    });
+
+    it('accepts style and colour tokens in either order', () => {
+      const a = ast([
+        '@startuml',
+        'A -[#blue,bold]-> B',
+        'C -[dotted,#blue]-> D',
+        '@enduml',
+      ].join('\n'));
+      expect(a.transitions[0]!.lineColor).toBe('blue');
+      expect(a.transitions[0]!.lineStyle).toBe('bold');
+      expect(a.transitions[1]!.lineColor).toBe('blue');
+      expect(a.transitions[1]!.lineStyle).toBe('dotted');
+    });
+
+    it('parses a style-only bracket `-[dashed]->` / `-[dotted]->`', () => {
+      const a = ast([
+        '@startuml',
+        'X1 -[dashed]-> X2',
+        'Z1 -[dotted]-> Z2',
+        '@enduml',
+      ].join('\n'));
+      expect(a.transitions).toHaveLength(2);
+      expect(a.transitions[0]!.lineStyle).toBe('dashed');
+      expect(a.transitions[0]!.style).toBe('dashed');
+      expect(a.transitions[1]!.lineStyle).toBe('dotted');
+      expect(a.transitions[1]!.style).toBe('dashed');
+    });
+
+    it('parses a bare directional arrow `-left->` without a bracket', () => {
+      const a = ast('@startuml\nA -left-> B\n@enduml');
+      expect(a.transitions).toHaveLength(1);
+      expect(a.transitions[0]!.direction).toBe('left');
+      expect(a.transitions[0]!.lineColor).toBeUndefined();
+    });
+
+    it('creates endpoint-only states referenced solely by a styled arrow', () => {
+      // S3, X1, X2, Y1, Y2 are never declared — they exist only as arrow
+      // endpoints and must still be auto-created as normal nodes.
+      const a = ast([
+        '@startuml',
+        'S1 -left[#yellow]-> S3',
+        'X1 -[dashed]-> X2',
+        'Y1 -[#blue,bold]-> Y2',
+        '@enduml',
+      ].join('\n'));
+      const ids = a.states.map((s) => s.id).filter((id) => !id.startsWith('__'));
+      expect(ids).toEqual(['S1', 'S3', 'X1', 'X2', 'Y1', 'Y2']);
+    });
+
+    it('parses the full "change line color and style" sample (11 nodes / 7 edges)', () => {
+      const a = ast([
+        '@startuml',
+        'State S1',
+        'State S2',
+        'S1 -[#DD00AA]-> S2',
+        'S1 -left[#yellow]-> S3',
+        'S1 -up[#red,dashed]-> S4',
+        'S1 -right[dotted,#blue]-> S5',
+        'X1 -[dashed]-> X2',
+        'Z1 -[dotted]-> Z2',
+        'Y1 -[#blue,bold]-> Y2',
+        '@enduml',
+      ].join('\n'));
+      const ids = a.states.map((s) => s.id).filter((id) => !id.startsWith('__'));
+      expect(ids).toHaveLength(11);
+      expect(a.transitions).toHaveLength(7);
+    });
+  });
 });

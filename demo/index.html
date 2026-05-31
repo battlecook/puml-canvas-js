@@ -107,10 +107,27 @@
       }
       .gallery-card-body {
         display: grid;
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: 1fr 1fr 1fr;
         align-items: stretch;
         gap: .5rem;
         padding: .5rem;
+      }
+      .gallery-column {
+        display: flex;
+        flex-direction: column;
+        gap: .3rem;
+        min-width: 0;
+      }
+      .gallery-column-label {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: .03em;
+      }
+      .gallery-column > .gallery-preview,
+      .gallery-column > .gallery-original {
+        flex: 1 1 auto;
       }
       .gallery-source {
         width: 100%;
@@ -159,6 +176,31 @@
         width: 100%;
       }
 
+      /* Reference rendering from the official PlantUML server (plantuml.com) */
+      .gallery-original {
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: #fff;
+        padding: .5rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .gallery-original img { display: block; max-width: 100%; height: auto; }
+      .gallery-original .placeholder {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .gallery-original pre {
+        margin: 0;
+        color: crimson;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        text-align: left;
+        width: 100%;
+      }
+
       @media (max-width: 900px) {
         body {
           grid-template-columns: 1fr;
@@ -168,6 +210,10 @@
         .kind-btn { width: auto; }
         #gallery { grid-row: 3 / 4; grid-column: 1 / -1; }
         .gallery-card-body { grid-template-columns: 1fr; }
+      }
+      @media (min-width: 901px) and (max-width: 1300px) {
+        .gallery-card-body { grid-template-columns: 1fr 1fr; }
+        .gallery-source { grid-column: 1 / -1; }
       }
     </style>
   </head>
