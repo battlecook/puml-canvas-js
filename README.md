@@ -43,6 +43,20 @@ document.body.appendChild(svg);
 `render(source)` returns an `SVGSVGElement`. The diagram type is auto-detected
 from the `@start...` wrapper and the first significant content line.
 
+## Dark theme
+
+Pass `theme: 'dark'` to render a dark-mode variant. `'light'` (the default)
+leaves colors exactly as before.
+
+```ts
+const svg = render(source, { theme: 'dark' });
+```
+
+Dark mode lightness-inverts every fill, stroke, and text color while preserving
+hue and saturation — so cream boxes and black text flip to a dark palette, but
+intentional accents (a red arrow, a blue note) keep their color. A dark page
+background (`#1e1e1e`) is painted automatically when the diagram doesn't set one.
+
 ## API
 
 ```ts

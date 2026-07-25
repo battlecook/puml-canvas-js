@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The project is pre-1.0. While the public API is stable across patch releases,
 > minor releases (0.X.0) may introduce breaking changes until 1.0.0.
 
+## [0.10.0] - 2026-07-25
+
+### Added
+
+- **Dark theme rendering.** `render(source, { theme: 'dark' })` produces a
+  dark-mode SVG. A new scene color-remap pass lightness-inverts every fill,
+  stroke, and text color (preserving hue and saturation, so accent colors keep
+  their identity) and paints a dark page background (`#1e1e1e`) when the diagram
+  doesn't set one. `theme: 'light'` remains the default and leaves output
+  byte-identical to previous releases. Exposed as `applyTheme` and the `Theme`
+  type for callers that render scenes directly.
+
 ## [0.9.0] - 2026-05-31
 
 ### Added

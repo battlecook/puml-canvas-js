@@ -1,6 +1,7 @@
 import { parse } from './parser/index.js';
 import { layout } from './layout/index.js';
 import { SvgRenderer } from './render/svg/index.js';
+import { applyTheme, type Theme } from './render/theme.js';
 import type { Scene } from './scene/types.js';
 import type { DiagramAst } from './ast/index.js';
 import {
@@ -10,10 +11,16 @@ import {
 
 export interface RenderOptions {
   document?: Document;
+  /**
+   * Color theme for the rendered SVG. `'light'` (default) keeps the original
+   * colors untouched; `'dark'` lightness-inverts fills, strokes, and text and
+   * paints a dark background.
+   */
+  theme?: Theme;
 }
 
 export function render(source: string, opts: RenderOptions = {}): SVGSVGElement {
-  const scene = compile(source);
+  const scene = applyTheme(compile(source), opts.theme ?? 'light');
   const renderer = new SvgRenderer(opts.document ? { document: opts.document } : {});
   return renderer.render(scene);
 }
@@ -52,6 +59,8 @@ export {
 } from './parser/index.js';
 export { layout } from './layout/index.js';
 export { SvgRenderer } from './render/svg/index.js';
+export { applyTheme } from './render/theme.js';
+export type { Theme } from './render/theme.js';
 export {
   detectUnsupportedDirectives,
   applyPreprocessorWarningBanner,

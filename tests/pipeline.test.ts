@@ -11,6 +11,20 @@ describe('end-to-end pipeline', () => {
     expect(texts.some((t) => t === 'hi')).toBe(true);
   });
 
+  it('renders a dark background and identical structure with theme: dark', () => {
+    const src = '@startuml\nparticipant Alice\nparticipant Bob\nAlice -> Bob: hi\n@enduml';
+    const light = render(src);
+    const dark = render(src, { theme: 'dark' });
+
+    // Dark paints a leading background rect with a concrete color.
+    const bg = dark.querySelector('rect')?.getAttribute('fill') ?? '';
+    expect(bg).toMatch(/^(#|rgba)/);
+    // Same set of text nodes regardless of theme.
+    const textsOf = (svg: SVGSVGElement) =>
+      Array.from(svg.querySelectorAll('text')).map((t) => t.textContent);
+    expect(textsOf(dark)).toEqual(textsOf(light));
+  });
+
   it('returns an unknown AST when no wrapper is present', () => {
     const ast = parseToAst('hello world');
     expect(ast.kind).toBe('unknown');

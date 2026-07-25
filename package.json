@@ -1,6 +1,6 @@
 {
   "name": "puml-canvas-js",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Native JavaScript implementation of PlantUML diagram rendering for the browser",
   "type": "module",
   "license": "MIT",
